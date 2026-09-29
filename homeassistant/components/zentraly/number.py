@@ -1,16 +1,11 @@
 """Number platform for Zentraly."""
 
+from contextlib import nullcontext
 from datetime import datetime
 import logging
 from typing import Any, assert_never, override
 
-from zentraly import (
-    NumberCapability,
-    ZentralyApiError,
-    ZentralyConnectionError,
-    ZentralyNumberApi,
-    ZentralyValidationError,
-)
+from zentraly import NumberCapability, ZentralyApiError, ZentralyNumberApi
 
 from homeassistant.components.number import NumberEntity
 from homeassistant.const import (
@@ -22,15 +17,16 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
 from .actions import translate_action_errors
-from .const import SCAN_INTERVAL
+from .const import DOMAIN, SCAN_INTERVAL
 from .models import ZentralyConfigEntry, ZentralyDevice
 
-PARALLEL_UPDATES = 0
+PARALLEL_UPDATES = 1
 
 _TIMER_DEBOUNCE_SECONDS = 3.0
 _LOGGER = logging.getLogger(__name__)
@@ -118,6 +114,7 @@ class ZentralyNumber(NumberEntity):
         """Initialize the Zentraly number."""
 
         self._device = device
+        self._state_version = 0
         self._number_api = number_api
         self._capability = capability
         self._endpoint = channel if channel is not None else 1
@@ -172,7 +169,7 @@ class ZentralyNumber(NumberEntity):
 
         await super().async_added_to_hass()
 
-        self.async_on_remove(self._device.add_state_listener(self.async_write_ha_state))
+        self.async_on_remove(self._device.add_state_listener(self._handle_device_state))
 
         self.async_on_remove(
             self._device.add_connection_state_listener(self._handle_connection_state)
@@ -213,7 +210,6 @@ class ZentralyNumber(NumberEntity):
         self._cancel_timer_write = None
 
         value = self._pending_timer_value
-        self._pending_timer_value = None
 
         if value is None:
             return
@@ -222,23 +218,30 @@ class ZentralyNumber(NumberEntity):
             return
 
         generation = self._timer_generation
-        try:
-            success = await self._number_api.async_set_timer(value)
-        except ZentralyApiError as err:
-            _LOGGER.error("Timer write failed for %s: %s", self.unique_id, err)
-            success = False
-        else:
-            if not success:
-                _LOGGER.error("Timer write failed for %s", self.unique_id)
+        async with self.parallel_updates or nullcontext():
+            if generation != self._timer_generation or not self._device.connected:
+                return
+            self._pending_timer_value = None
+            state_version = self._state_version
+            try:
+                success = await self._number_api.async_set_timer(value)
+            except ZentralyApiError as err:
+                _LOGGER.error("Timer write failed for %s: %s", self.unique_id, err)
+                success = False
+            else:
+                if not success:
+                    _LOGGER.error("Timer write failed for %s", self.unique_id)
 
-        if generation != self._timer_generation:
-            return
+            if generation != self._timer_generation:
+                return
 
-        if success:
-            self._attr_native_value = value
-            self.async_write_ha_state()
-            return
+            if success:
+                if state_version == self._state_version:
+                    self._attr_native_value = value
+                    self.async_write_ha_state()
+                return
 
+        # Recovery must run after releasing the platform semaphore.
         await self.async_update_ha_state(force_refresh=True)
 
     async def _async_periodic_refresh(
@@ -267,6 +270,12 @@ class ZentralyNumber(NumberEntity):
             )
         )
 
+    def _handle_device_state(self) -> None:
+        """Invalidate reads when shared availability changes."""
+        if not self.available:
+            self._state_version += 1
+        self.async_write_ha_state()
+
     def _handle_connection_state(
         self,
         connected: bool,
@@ -274,6 +283,7 @@ class ZentralyNumber(NumberEntity):
         """Handle Zentraly connection-state changes."""
 
         self._attr_available = connected
+        self._state_version += 1
 
         if not connected:
             if self._capability is NumberCapability.TIMER:
@@ -304,6 +314,7 @@ class ZentralyNumber(NumberEntity):
         if not isinstance(value, int | float):
             return
 
+        self._state_version += 1
         self._attr_native_value = float(value)
         self.async_write_ha_state()
 
@@ -321,6 +332,7 @@ class ZentralyNumber(NumberEntity):
         ):
             return
 
+        state_version = self._state_version
         value: float | None
 
         if self._capability is NumberCapability.TIMER:
@@ -354,7 +366,8 @@ class ZentralyNumber(NumberEntity):
         else:
             assert_never(self._capability)
 
-        self._attr_native_value = value
+        if state_version == self._state_version:
+            self._attr_native_value = value
 
     @override
     @translate_action_errors
@@ -365,7 +378,9 @@ class ZentralyNumber(NumberEntity):
         """Set the Zentraly number value."""
 
         if not self._device.connected:
-            raise ZentralyConnectionError("Device disconnected")
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="cannot_connect"
+            )
 
         if self._capability is NumberCapability.TIMER:
             self._cancel_pending_timer_write()
@@ -406,10 +421,14 @@ class ZentralyNumber(NumberEntity):
             success = await self._number_api.async_set_high_power_limit(value)
 
         else:
-            raise ZentralyValidationError("Unsupported action")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_action"
+            )
 
         if not success:
-            raise ZentralyApiError("Action failed")
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="action_failed"
+            )
 
         self._attr_native_value = value
         self.async_write_ha_state()

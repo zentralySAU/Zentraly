@@ -97,6 +97,7 @@ class ZentralyClimate(ClimateEntity):
         self._normal_target_temperature: float | None = None
         self._away_temperature: float | None = None
         self._heat_demand: bool | None = None
+        self._report_versions: dict[ClimateCapability, int] = {}
 
         self._configure_features()
 
@@ -163,41 +164,51 @@ class ZentralyClimate(ClimateEntity):
 
             if isinstance(value, int | float):
                 self._attr_current_temperature = float(value)
+                self._record_report(ClimateCapability.LOCAL_TEMPERATURE)
 
         if ClimateCapability.TARGET_TEMPERATURE in updates:
             value = updates[ClimateCapability.TARGET_TEMPERATURE]
 
             if isinstance(value, int | float):
                 self._normal_target_temperature = float(value)
+                self._record_report(ClimateCapability.TARGET_TEMPERATURE)
 
         if ClimateCapability.AWAY_TEMPERATURE in updates:
             value = updates[ClimateCapability.AWAY_TEMPERATURE]
 
             if isinstance(value, int | float):
                 self._away_temperature = float(value)
+                self._record_report(ClimateCapability.AWAY_TEMPERATURE)
 
         if ClimateCapability.OPERATION_MODE in updates:
             value = updates[ClimateCapability.OPERATION_MODE]
 
             if isinstance(value, ClimateOperationMode):
                 self._apply_operation_mode(value)
+                self._record_report(ClimateCapability.OPERATION_MODE)
 
         if ClimateCapability.HEAT_DEMAND in updates:
             value = updates[ClimateCapability.HEAT_DEMAND]
 
             if isinstance(value, bool):
                 self._heat_demand = value
+                self._record_report(ClimateCapability.HEAT_DEMAND)
 
         if ClimateCapability.HUMIDITY in updates:
             value = updates[ClimateCapability.HUMIDITY]
 
             if isinstance(value, int | float):
                 self._attr_current_humidity = float(value)
+                self._record_report(ClimateCapability.HUMIDITY)
 
         self._update_target_temperature()
         self._update_hvac_action()
 
         self.async_write_ha_state()
+
+    def _record_report(self, capability: ClimateCapability) -> None:
+        """Invalidate any outstanding read for this reported field."""
+        self._report_versions[capability] = self._report_versions.get(capability, 0) + 1
 
     def _configure_features(self) -> None:
         """Configure Home Assistant features from device capabilities."""
@@ -242,6 +253,8 @@ class ZentralyClimate(ClimateEntity):
 
         if not self._device.connected:
             return
+
+        report_versions = self._report_versions.copy()
 
         current_temperature_task = (
             asyncio.create_task(self._climate_api.async_get_current_temperature())
@@ -301,32 +314,44 @@ class ZentralyClimate(ClimateEntity):
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
 
-        if current_temperature_task is not None:
+        if current_temperature_task is not None and self._report_versions.get(
+            ClimateCapability.LOCAL_TEMPERATURE, 0
+        ) == report_versions.get(ClimateCapability.LOCAL_TEMPERATURE, 0):
             current_temperature = current_temperature_task.result()
 
             self._attr_current_temperature = current_temperature
 
-        if target_temperature_task is not None:
+        if target_temperature_task is not None and self._report_versions.get(
+            ClimateCapability.TARGET_TEMPERATURE, 0
+        ) == report_versions.get(ClimateCapability.TARGET_TEMPERATURE, 0):
             target_temperature = target_temperature_task.result()
 
             self._normal_target_temperature = target_temperature
 
-        if away_temperature_task is not None:
+        if away_temperature_task is not None and self._report_versions.get(
+            ClimateCapability.AWAY_TEMPERATURE, 0
+        ) == report_versions.get(ClimateCapability.AWAY_TEMPERATURE, 0):
             away_temperature = away_temperature_task.result()
 
             self._away_temperature = away_temperature
 
-        if operation_mode_task is not None:
+        if operation_mode_task is not None and self._report_versions.get(
+            ClimateCapability.OPERATION_MODE, 0
+        ) == report_versions.get(ClimateCapability.OPERATION_MODE, 0):
             operation_mode = operation_mode_task.result()
 
             self._apply_operation_mode(operation_mode)
 
-        if heat_demand_task is not None:
+        if heat_demand_task is not None and self._report_versions.get(
+            ClimateCapability.HEAT_DEMAND, 0
+        ) == report_versions.get(ClimateCapability.HEAT_DEMAND, 0):
             heat_demand = heat_demand_task.result()
 
             self._heat_demand = heat_demand
 
-        if humidity_task is not None:
+        if humidity_task is not None and self._report_versions.get(
+            ClimateCapability.HUMIDITY, 0
+        ) == report_versions.get(ClimateCapability.HUMIDITY, 0):
             humidity = humidity_task.result()
 
             self._attr_current_humidity = humidity

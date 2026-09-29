@@ -403,6 +403,64 @@ async def test_temperature_with_unsupported_mode(
     assert hass.states.get(ENTITY_ID) == before
 
 
+@pytest.mark.parametrize(
+    ("operation_mode", "target", "hvac_mode"),
+    [
+        pytest.param(ClimateOperationMode.AUTO, 24.0, HVACMode.AUTO, id="normal"),
+        pytest.param(ClimateOperationMode.AWAY, 18.0, HVACMode.HEAT, id="away"),
+    ],
+)
+async def test_report_during_refresh(
+    hass: HomeAssistant,
+    mock_climate_api: MagicMock,
+    connection_state: Callable[[bool], None],
+    operation_mode: ClimateOperationMode,
+    target: float,
+    hvac_mode: HVACMode,
+) -> None:
+    """Reports stay current while unaffected fields accept their read results."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def read_humidity() -> float:
+        started.set()
+        await release.wait()
+        return 60.0
+
+    mock_climate_api.supports.side_effect = None
+    mock_climate_api.supports.return_value = True
+    mock_climate_api.async_get_away_temperature.return_value = 17.0
+    mock_climate_api.async_get_humidity.side_effect = read_humidity
+    connection_state(True)
+    await started.wait()
+    try:
+        mock_climate_api.add_state_listener.call_args.args[0](
+            {
+                ClimateCapability.LOCAL_TEMPERATURE: 22.0,
+                ClimateCapability.TARGET_TEMPERATURE: 24.0,
+                ClimateCapability.AWAY_TEMPERATURE: 18.0,
+                ClimateCapability.OPERATION_MODE: operation_mode,
+                ClimateCapability.HEAT_DEMAND: True,
+            }
+        )
+    finally:
+        release.set()
+    await hass.async_block_till_done()
+    state = hass.states.get(ENTITY_ID)
+    assert state.attributes[ATTR_CURRENT_TEMPERATURE] == 22.0
+    assert state.attributes[ATTR_TEMPERATURE] == target
+    assert state.attributes[ATTR_CURRENT_HUMIDITY] == 60.0
+    assert state.state == hvac_mode
+    assert state.attributes[ATTR_HVAC_ACTION] == HVACAction.HEATING
+
+    mock_climate_api.async_get_humidity.side_effect = None
+    connection_state(True)
+    await hass.async_block_till_done()
+    state = hass.states.get(ENTITY_ID)
+    assert state.attributes[ATTR_CURRENT_TEMPERATURE] == 19.0
+    assert state.attributes[ATTR_TEMPERATURE] == 21.0
+
+
 async def test_separate_away_temperature(
     hass: HomeAssistant,
     mock_climate_api: MagicMock,

@@ -2,20 +2,17 @@
 
 from typing import override
 
-from zentraly import (
-    ButtonCapability,
-    ZentralyApiError,
-    ZentralyButtonApi,
-    ZentralyConnectionError,
-)
+from zentraly import ButtonCapability, ZentralyButtonApi
 
 from homeassistant.components.button import ButtonEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .actions import translate_action_errors
+from .const import DOMAIN
 from .models import ZentralyConfigEntry, ZentralyDevice
 
 PARALLEL_UPDATES = 0
@@ -151,18 +148,24 @@ class ZentralyButton(ButtonEntity):
         """Handle the button press."""
 
         if not self.available:
-            raise ZentralyConnectionError("Device unavailable")
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="cannot_connect"
+            )
 
         if self._capability is ButtonCapability.RESET_DEVICE:
             success = await self._button_api.async_reset_device()
             if not success:
-                raise ZentralyApiError("Reset failed")
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN, translation_key="action_failed"
+                )
             return
 
         if self._capability is ButtonCapability.RESET_BOILER:
             success = await self._button_api.async_reset_boiler()
             if not success:
-                raise ZentralyApiError("Reset failed")
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN, translation_key="action_failed"
+                )
 
     @property
     @override

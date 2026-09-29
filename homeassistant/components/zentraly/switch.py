@@ -3,26 +3,21 @@
 from datetime import datetime
 from typing import Any, assert_never, override
 
-from zentraly import (
-    SwitchCapability,
-    ZentralyApiError,
-    ZentralyConnectionError,
-    ZentralySwitchApi,
-    ZentralyValidationError,
-)
+from zentraly import SwitchCapability, ZentralySwitchApi
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
 from .actions import translate_action_errors
-from .const import SCAN_INTERVAL
+from .const import DOMAIN, SCAN_INTERVAL
 from .models import ZentralyConfigEntry, ZentralyDevice
 
-PARALLEL_UPDATES = 0
+PARALLEL_UPDATES = 1
 
 _OPENTHERM_CAPABILITIES = frozenset(
     {
@@ -117,6 +112,7 @@ class ZentralySwitch(SwitchEntity):
         self._device = device
         self._switch_api = switch_api
         self._capability = capability
+        self._state_version = 0
 
         self._attr_unique_id = f"{device.device_id}_{capability.value}"
         self._attr_translation_key = capability.value
@@ -134,7 +130,7 @@ class ZentralySwitch(SwitchEntity):
 
         await super().async_added_to_hass()
 
-        self.async_on_remove(self._device.add_state_listener(self.async_write_ha_state))
+        self.async_on_remove(self._device.add_state_listener(self._handle_device_state))
 
         self.async_on_remove(
             self._device.add_connection_state_listener(self._handle_connection_state)
@@ -173,12 +169,19 @@ class ZentralySwitch(SwitchEntity):
             return False
         return self._device.available and self._device.connected
 
+    def _handle_device_state(self) -> None:
+        """Invalidate reads when shared availability changes."""
+        if not self.available:
+            self._state_version += 1
+        self.async_write_ha_state()
+
     def _handle_connection_state(
         self,
         connected: bool,
     ) -> None:
         """Handle Zentraly connection-state changes."""
 
+        self._state_version += 1
         self._update_availability(connected)
 
         if not self._attr_available:
@@ -226,6 +229,7 @@ class ZentralySwitch(SwitchEntity):
         if not isinstance(value, bool):
             return
 
+        self._state_version += 1
         self._attr_is_on = value
         self.async_write_ha_state()
 
@@ -237,6 +241,7 @@ class ZentralySwitch(SwitchEntity):
         if not self._attr_available:
             return
 
+        state_version = self._state_version
         value: bool | None
 
         if self._capability is SwitchCapability.POWER:
@@ -275,7 +280,8 @@ class ZentralySwitch(SwitchEntity):
         else:
             assert_never(self._capability)
 
-        self._attr_is_on = value
+        if state_version == self._state_version:
+            self._attr_is_on = value
 
     @override
     @translate_action_errors
@@ -288,7 +294,9 @@ class ZentralySwitch(SwitchEntity):
         success = await self._async_set_state(True)
 
         if not success:
-            raise ZentralyApiError("Action failed")
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="action_failed"
+            )
 
         self._attr_is_on = True
         self.async_write_ha_state()
@@ -304,7 +312,9 @@ class ZentralySwitch(SwitchEntity):
         success = await self._async_set_state(False)
 
         if not success:
-            raise ZentralyApiError("Action failed")
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="action_failed"
+            )
 
         self._attr_is_on = False
         self.async_write_ha_state()
@@ -318,7 +328,9 @@ class ZentralySwitch(SwitchEntity):
         self._update_availability(self._device.connected)
 
         if not self._attr_available:
-            raise ZentralyConnectionError("Device unavailable")
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="cannot_connect"
+            )
 
         if self._capability is SwitchCapability.POWER:
             return await self._switch_api.async_set_power(enabled)
@@ -353,7 +365,9 @@ class ZentralySwitch(SwitchEntity):
         if self._capability is SwitchCapability.HIGH_POWER_PROTECTION:
             return await self._switch_api.async_set_high_power_protection(enabled)
 
-        raise ZentralyValidationError("Unsupported switch action")
+        raise ServiceValidationError(
+            translation_domain=DOMAIN, translation_key="invalid_action"
+        )
 
     @property
     @override
