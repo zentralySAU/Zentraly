@@ -130,6 +130,7 @@ class ZentralySensor(SensorEntity):
         self._device = device
         self._sensor_api = sensor_api
         self._capability = capability
+        self._state_version = 0
 
         self._attr_unique_id = f"{device.device_id}_{capability.value}"
         self._attr_translation_key = capability.value
@@ -231,6 +232,15 @@ class ZentralySensor(SensorEntity):
     def _handle_device_state(self) -> None:
         """Publish shared device state without starting another query."""
         if (
+            not self.available
+            or self._capability is SensorCapability.OUTPUT_TYPE
+            or (
+                self._capability in _OPENTHERM_CAPABILITIES
+                and not self._device.opentherm_connected
+            )
+        ):
+            self._state_version += 1
+        if (
             self._capability in _OPENTHERM_CAPABILITIES
             and not self._device.opentherm_connected
         ):
@@ -247,6 +257,7 @@ class ZentralySensor(SensorEntity):
         """Handle Zentraly connection-state changes."""
 
         self._attr_available = connected
+        self._state_version += 1
 
         if not connected:
             self.async_write_ha_state()
@@ -273,12 +284,14 @@ class ZentralySensor(SensorEntity):
             if not isinstance(value, ZentralyOutputType):
                 return
 
+            self._state_version += 1
             self._attr_native_value = value.value
             self.async_write_ha_state()
             return
 
         if self._capability in _OPENTHERM_CAPABILITIES:
             if not self._device.opentherm_connected:
+                self._state_version += 1
                 self._attr_native_value = None
                 self.async_write_ha_state()
                 return
@@ -286,6 +299,7 @@ class ZentralySensor(SensorEntity):
         if not isinstance(value, int | float):
             return
 
+        self._state_version += 1
         self._attr_native_value = value
         self.async_write_ha_state()
 
@@ -300,8 +314,12 @@ class ZentralySensor(SensorEntity):
         if self._capability in _REPORT_ONLY_CAPABILITIES:
             return
 
+        state_version = self._state_version
         if self._capability is SensorCapability.OUTPUT_TYPE:
             output_type = await self._sensor_api.async_get_output_type()
+
+            if state_version != self._state_version:
+                return
 
             if output_type is None:
                 self._attr_native_value = None
@@ -361,7 +379,8 @@ class ZentralySensor(SensorEntity):
         else:
             return
 
-        self._attr_native_value = value
+        if state_version == self._state_version:
+            self._attr_native_value = value
 
     @property
     @override

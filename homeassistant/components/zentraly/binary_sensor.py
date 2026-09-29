@@ -100,6 +100,7 @@ class ZentralyBinarySensor(BinarySensorEntity):
         self._device = device
         self._binary_sensor_api = binary_sensor_api
         self._capability = capability
+        self._state_version = 0
 
         self._attr_unique_id = f"{device.device_id}_{capability.value}"
         self._attr_translation_key = capability.value
@@ -149,6 +150,11 @@ class ZentralyBinarySensor(BinarySensorEntity):
 
     def _handle_device_state(self) -> None:
         """Publish shared device state without starting another query."""
+        if not self.available or (
+            self._capability in _OPENTHERM_CAPABILITIES
+            and not self._device.opentherm_connected
+        ):
+            self._state_version += 1
         if (
             self._capability in _OPENTHERM_CAPABILITIES
             and not self._device.opentherm_connected
@@ -163,6 +169,7 @@ class ZentralyBinarySensor(BinarySensorEntity):
         """Handle Zentraly connection-state changes."""
 
         self._attr_available = connected
+        self._state_version += 1
 
         if not connected:
             self.async_write_ha_state()
@@ -182,6 +189,7 @@ class ZentralyBinarySensor(BinarySensorEntity):
         value = updates[self._capability]
 
         if value is None and self._capability in _OPENTHERM_CAPABILITIES:
+            self._state_version += 1
             self._attr_is_on = None
             self.async_write_ha_state()
             return
@@ -189,6 +197,7 @@ class ZentralyBinarySensor(BinarySensorEntity):
         if not isinstance(value, bool):
             return
 
+        self._state_version += 1
         self._attr_is_on = value
         self.async_write_ha_state()
 
@@ -207,6 +216,7 @@ class ZentralyBinarySensor(BinarySensorEntity):
             self._attr_is_on = None
             return
 
+        state_version = self._state_version
         value: bool | None
 
         if self._capability is BinarySensorCapability.BOILER_ON:
@@ -224,7 +234,8 @@ class ZentralyBinarySensor(BinarySensorEntity):
         else:
             assert_never(self._capability)
 
-        self._attr_is_on = value
+        if state_version == self._state_version:
+            self._attr_is_on = value
 
     @property
     @override

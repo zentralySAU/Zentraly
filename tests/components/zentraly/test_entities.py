@@ -9,9 +9,11 @@ from unittest.mock import patch
 import pytest
 from zentraly import (
     ZentralyApi,
+    ZentralyBinarySensorApi,
     ZentralyConnectionError,
     ZentralyDeviceInfo,
     ZentralyOutputType,
+    ZentralySensorApi,
 )
 
 from homeassistant.components.zentraly import create_device
@@ -41,6 +43,68 @@ from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.util import dt as dt_util
 
 from tests.common import MockConfigEntry, async_fire_time_changed
+
+
+@pytest.mark.parametrize(
+    ("domain", "factory", "capability", "api_class", "getter", "value"),
+    [
+        pytest.param(
+            "sensor",
+            _create_sensor_entities,
+            "feed_temperature",
+            ZentralySensorApi,
+            "async_get_feed_temperature",
+            40.0,
+            id="sensor",
+        ),
+        pytest.param(
+            "binary_sensor",
+            _create_binary_sensor_entities,
+            "ot_dhw_enabled",
+            ZentralyBinarySensorApi,
+            "async_get_ot_dhw_enabled",
+            True,
+            id="binary_sensor",
+        ),
+    ],
+)
+async def test_opentherm_loss_during_read(
+    hass: HomeAssistant,
+    domain: str,
+    factory: Callable[[ZentralyDevice], list[Entity]],
+    capability: str,
+    api_class: type[ZentralySensorApi | ZentralyBinarySensorApi],
+    getter: str,
+    value: float | bool,
+) -> None:
+    """A response cannot restore values invalidated by loss of OpenTherm."""
+    api = ZentralyApi("192.168.1.42", 80, "password", "ZTTWZ0100000001")
+    api._set_connected(True)
+    device = create_device(api, "ZTBIN0100000001", "bb")
+    device.set_output_type(ZentralyOutputType.OPENTHERM)
+    entity = next(
+        entity for entity in factory(device) if entity.translation_key == capability
+    )
+    entity.entity_id = f"{domain}.zentraly_test"
+    component = EntityComponent(logging.getLogger(__name__), domain, hass)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def read() -> float | bool:
+        started.set()
+        await release.wait()
+        return value
+
+    with patch.object(api_class, getter, side_effect=read):
+        await component.async_add_entities([entity])
+        await started.wait()
+        try:
+            device.set_output_type(ZentralyOutputType.ON_OFF)
+        finally:
+            release.set()
+        await hass.async_block_till_done()
+    assert hass.states.get(entity.entity_id).state == "unknown"
+    await entity.async_remove()
 
 
 @pytest.mark.parametrize(

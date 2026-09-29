@@ -7,24 +7,22 @@ from zentraly import (
     DisplayMode,
     SelectCapability,
     SelectOperationMode,
-    ZentralyApiError,
-    ZentralyConnectionError,
     ZentralySelectApi,
-    ZentralyValidationError,
 )
 
 from homeassistant.components.select import SelectEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
 from .actions import translate_action_errors
-from .const import SCAN_INTERVAL
+from .const import DOMAIN, SCAN_INTERVAL
 from .models import ZentralyConfigEntry, ZentralyDevice
 
-PARALLEL_UPDATES = 0
+PARALLEL_UPDATES = 1
 
 
 def _create_select_entities(
@@ -98,6 +96,7 @@ class ZentralySelect(SelectEntity):
         self._device = device
         self._select_api = select_api
         self._capability = capability
+        self._state_version = 0
         self._endpoint = channel if channel is not None else 1
 
         self._attr_unique_id = f"{device.device_id}_{capability.value}"
@@ -120,7 +119,7 @@ class ZentralySelect(SelectEntity):
 
         await super().async_added_to_hass()
 
-        self.async_on_remove(self._device.add_state_listener(self.async_write_ha_state))
+        self.async_on_remove(self._device.add_state_listener(self._handle_device_state))
 
         self.async_on_remove(
             self._device.add_connection_state_listener(self._handle_connection_state)
@@ -160,6 +159,12 @@ class ZentralySelect(SelectEntity):
             )
         )
 
+    def _handle_device_state(self) -> None:
+        """Invalidate reads when shared availability changes."""
+        if not self.available:
+            self._state_version += 1
+        self.async_write_ha_state()
+
     def _handle_connection_state(
         self,
         connected: bool,
@@ -167,6 +172,7 @@ class ZentralySelect(SelectEntity):
         """Handle Zentraly connection-state changes."""
 
         self._attr_available = connected
+        self._state_version += 1
 
         if not connected:
             self.async_write_ha_state()
@@ -188,6 +194,7 @@ class ZentralySelect(SelectEntity):
         if value not in self._select_api.get_options(self._capability):
             return
 
+        self._state_version += 1
         option = value.value
 
         if option not in self._attr_options:
@@ -206,6 +213,7 @@ class ZentralySelect(SelectEntity):
         if not self._device.connected:
             return
 
+        state_version = self._state_version
         value: DisplayMode | SelectOperationMode | None
         if self._capability is SelectCapability.DISPLAY_MODE:
             value = await self._select_api.async_get_display_mode()
@@ -213,6 +221,9 @@ class ZentralySelect(SelectEntity):
             value = await self._select_api.async_get_operation_mode()
         else:
             assert_never(self._capability)
+
+        if state_version != self._state_version:
+            return
 
         if value is None:
             self._attr_current_option = None
@@ -235,7 +246,9 @@ class ZentralySelect(SelectEntity):
         """Select a Zentraly option."""
 
         if not self._device.connected:
-            raise ZentralyConnectionError("Device disconnected")
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="cannot_connect"
+            )
 
         try:
             value = next(
@@ -244,7 +257,9 @@ class ZentralySelect(SelectEntity):
                 if value.value == option
             )
         except StopIteration as err:
-            raise ZentralyValidationError("Invalid option") from err
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_action"
+            ) from err
 
         if self._capability is SelectCapability.DISPLAY_MODE and isinstance(
             value, DisplayMode
@@ -255,10 +270,14 @@ class ZentralySelect(SelectEntity):
         ):
             success = await self._select_api.async_set_operation_mode(value)
         else:
-            raise ZentralyValidationError("Unsupported action")
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="invalid_action"
+            )
 
         if not success:
-            raise ZentralyApiError("Action failed")
+            raise HomeAssistantError(
+                translation_domain=DOMAIN, translation_key="action_failed"
+            )
 
         self._attr_current_option = value.value
         self.async_write_ha_state()
