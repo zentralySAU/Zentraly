@@ -1,5 +1,6 @@
 """Tests for the Zentraly config flow."""
 
+from collections.abc import Awaitable, Callable
 from ipaddress import ip_address
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -18,16 +19,26 @@ from homeassistant.const import (
     CONF_DEVICE_ID,
     CONF_HOST,
     CONF_MAC,
+    CONF_NAME,
     CONF_PASSWORD,
     CONF_PORT,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import area_registry as ar, device_registry as dr
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 from tests.common import MockConfigEntry
 
 pytestmark = pytest.mark.usefixtures("mock_setup_entry")
+
+type ChildFlowManager = (
+    config_entries.ConfigEntriesFlowManager | config_entries.ConfigSubentryFlowManager
+)
+type ChildFlowState = tuple[ChildFlowManager, str, MockConfigEntry]
+type StartChildFlow = Callable[
+    [MockConfigEntry], Awaitable[tuple[ChildFlowManager, str]]
+]
 
 
 @pytest.mark.parametrize(
@@ -538,10 +549,11 @@ async def test_child_device_success(
         },
     )
 
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["title"] == CHILD_DEVICE_ID
-    assert result["unique_id"] == CHILD_DEVICE_ID
-    assert result["data"] == {
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "child_details"
+    assert next(iter(entry.subentries.values())).title == CHILD_DEVICE_ID
+    assert next(iter(entry.subentries.values())).unique_id == CHILD_DEVICE_ID
+    assert next(iter(entry.subentries.values())).data == {
         CONF_DEVICE_ID: CHILD_DEVICE_ID,
         CONF_MAC: CHILD_MAC,
     }
@@ -614,8 +626,9 @@ async def test_child_device_invalid_mac(
         result["flow_id"],
         user_input={CONF_DEVICE_ID: CHILD_DEVICE_ID, CONF_MAC: CHILD_MAC},
     )
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"] == {
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "child_details"
+    assert next(iter(entry.subentries.values())).data == {
         CONF_DEVICE_ID: CHILD_DEVICE_ID,
         CONF_MAC: CHILD_MAC,
     }
@@ -668,8 +681,9 @@ async def test_child_device_validation_error_recovery(
         result["flow_id"],
         user_input={CONF_DEVICE_ID: CHILD_DEVICE_ID, CONF_MAC: CHILD_MAC},
     )
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"] == {
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "child_details"
+    assert next(iter(entry.subentries.values())).data == {
         CONF_DEVICE_ID: CHILD_DEVICE_ID,
         CONF_MAC: CHILD_MAC,
     }
@@ -714,8 +728,9 @@ async def test_child_device_unknown_model(
         result["flow_id"],
         user_input={CONF_DEVICE_ID: CHILD_DEVICE_ID, CONF_MAC: CHILD_MAC},
     )
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"] == {
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "child_details"
+    assert next(iter(entry.subentries.values())).data == {
         CONF_DEVICE_ID: CHILD_DEVICE_ID,
         CONF_MAC: CHILD_MAC,
     }
@@ -760,8 +775,9 @@ async def test_zteim_cannot_be_added_as_child(
         result["flow_id"],
         user_input={CONF_DEVICE_ID: CHILD_DEVICE_ID, CONF_MAC: CHILD_MAC},
     )
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"] == {
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "child_details"
+    assert next(iter(entry.subentries.values())).data == {
         CONF_DEVICE_ID: CHILD_DEVICE_ID,
         CONF_MAC: CHILD_MAC,
     }
@@ -989,8 +1005,9 @@ async def test_child_already_configured_as_subentry(
         result["flow_id"],
         user_input={CONF_DEVICE_ID: " ztbin0100000022 ", CONF_MAC: "AA-BB-CC-DD-EE-FF"},
     )
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"] == {
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "child_details"
+    assert next(iter(entry.subentries.values())).data == {
         CONF_DEVICE_ID: "ZTBIN0100000022",
         CONF_MAC: "aabbccddeeff",
     }
@@ -1050,9 +1067,11 @@ async def test_add_child_from_integration_picker(hass: HomeAssistant) -> None:
     )
     assert result["step_id"] == "user"
     parent_selector = result["data_schema"].schema["parent"]
-    assert {option["value"] for option in parent_selector.config["options"]} == {
-        parent.entry_id,
-        other.entry_id,
+    assert {
+        option["value"]: option["label"] for option in parent_selector.config["options"]
+    } == {
+        parent.entry_id: DEVICE_ID,
+        other.entry_id: "ZTTIN0100000999",
     }
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"parent": parent.entry_id}
@@ -1065,8 +1084,8 @@ async def test_add_child_from_integration_picker(hass: HomeAssistant) -> None:
             {CONF_DEVICE_ID: CHILD_DEVICE_ID.lower(), CONF_MAC: "10:20:BA:12:31:6C"},
         )
         await hass.async_block_till_done()
-    assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "child_added"
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "child_details"
     assert len(hass.config_entries.async_entries(DOMAIN)) == 3
     child = next(iter(parent.subentries.values()))
     assert child.unique_id == CHILD_DEVICE_ID
@@ -1150,7 +1169,7 @@ async def test_picker_child_validation_recovery(hass: HomeAssistant) -> None:
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {CONF_DEVICE_ID: CHILD_DEVICE_ID, CONF_MAC: CHILD_MAC}
     )
-    assert result["reason"] == "child_added"
+    assert result["step_id"] == "child_details"
     assert len(parent.subentries) == 1
 
 
@@ -1188,7 +1207,7 @@ async def test_unlimited_gateway_accepts_multiple_children(
         result["flow_id"],
         {CONF_DEVICE_ID: "ZTEIE0100000002", CONF_MAC: "aabbccddee22"},
     )
-    assert result["reason"] == "child_added"
+    assert result["step_id"] == "child_details"
     assert len(parent.subentries) == 2
     validate.assert_awaited_once_with("ZTEIE0100000002", "aabbccddee22")
 
@@ -1215,7 +1234,7 @@ async def test_gateway_child_with_64_bit_address(hass: HomeAssistant, mac: str) 
         result["flow_id"],
         {CONF_DEVICE_ID: "ZTTZB01JAY3PRQHQU", CONF_MAC: mac},
     )
-    assert result["reason"] == "child_added"
+    assert result["step_id"] == "child_details"
     validate.assert_awaited_once_with("ZTTZB01JAY3PRQHQU", "4831b7fffec60785")
     child = next(iter(parent.subentries.values()))
     assert child.data[CONF_MAC] == "4831b7fffec60785"
@@ -1266,8 +1285,8 @@ async def test_picker_parent_changes(hass: HomeAssistant) -> None:
         pytest.param("duplicate", "already_configured", id="child-added-elsewhere"),
     ],
 )
-async def test_picker_changes_during_validation(
-    hass: HomeAssistant, change: str, expected: str
+async def test_changes_during_validation(
+    hass: HomeAssistant, change: str, expected: str, start_child_flow: StartChildFlow
 ) -> None:
     """Do not attach a child using stale information after awaiting the device."""
     parent = _parent_entry()
@@ -1298,14 +1317,162 @@ async def test_picker_changes_during_validation(
             )
         )
     )
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_USER}
-    )
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"parent": parent.entry_id}
-    )
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {CONF_DEVICE_ID: CHILD_DEVICE_ID, CONF_MAC: CHILD_MAC}
+    manager, flow_id = await start_child_flow(parent)
+    result = await manager.async_configure(
+        flow_id, {CONF_DEVICE_ID: CHILD_DEVICE_ID, CONF_MAC: CHILD_MAC}
     )
     assert result.get("reason", result.get("errors", {}).get("base")) == expected
     assert not parent.subentries
+
+
+@pytest.fixture(params=["picker", "subentry"])
+def start_child_flow(
+    hass: HomeAssistant, request: pytest.FixtureRequest
+) -> StartChildFlow:
+    """Start child validation through either UI entry point."""
+
+    async def start(entry: MockConfigEntry) -> tuple[ChildFlowManager, str]:
+        manager: ChildFlowManager
+        if request.param == "picker":
+            manager = hass.config_entries.flow
+            result = await manager.async_init(
+                DOMAIN, context={"source": config_entries.SOURCE_USER}
+            )
+            result = await manager.async_configure(
+                result["flow_id"], {"parent": entry.entry_id}
+            )
+        else:
+            manager = hass.config_entries.subentries
+            result = await manager.async_init(
+                (entry.entry_id, SUBENTRY_TYPE_DEVICE),
+                context={"source": config_entries.SOURCE_USER},
+            )
+        return manager, result["flow_id"]
+
+    return start
+
+
+@pytest.fixture
+async def child_details_flow(
+    hass: HomeAssistant, start_child_flow: StartChildFlow
+) -> ChildFlowState:
+    """Add a child through either supported UI entry point."""
+    entry = _parent_entry()
+    entry.add_to_hass(hass)
+    entry.runtime_data = SimpleNamespace(
+        api=SimpleNamespace(async_validate_child_device=AsyncMock())
+    )
+    manager, flow_id = await start_child_flow(entry)
+    result = await manager.async_configure(
+        flow_id, {CONF_DEVICE_ID: CHILD_DEVICE_ID, CONF_MAC: CHILD_MAC}
+    )
+    assert result["step_id"] == "child_details"
+    assert result["last_step"] is True
+    assert len(entry.subentries) == 1
+    return manager, result["flow_id"], entry
+
+
+async def test_child_details_save(
+    child_details_flow: ChildFlowState,
+    device_registry: dr.DeviceRegistry,
+    area_registry: ar.AreaRegistry,
+) -> None:
+    """Optional personalization updates the registry, never the child's identity."""
+    manager, flow_id, entry = child_details_flow
+    area = area_registry.async_create("Living room")
+    child = next(iter(entry.subentries.values()))
+    device = device_registry.async_get_device_by_identifier(
+        (DOMAIN, CHILD_DEVICE_ID), entry.entry_id
+    )
+    assert device is not None
+    assert device.config_subentry_id == child.subentry_id
+    result = await manager.async_configure(
+        flow_id, {CONF_NAME: " Thermostat ", "area_id": area.id}
+    )
+    assert result["reason"] == "child_added"
+    device = device_registry.async_get(device.id)
+    assert device.name_by_user == "Thermostat"
+    assert device.area_id == area.id
+    assert child.data == {CONF_DEVICE_ID: CHILD_DEVICE_ID, CONF_MAC: CHILD_MAC}
+    assert len(entry.subentries) == 1
+    entry.runtime_data.api.async_validate_child_device.assert_awaited_once()
+    # Later setup enriches the existing device without replacing personalization.
+    enriched = device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        config_subentry_id=child.subentry_id,
+        identifiers={(DOMAIN, CHILD_DEVICE_ID)},
+        name=CHILD_DEVICE_ID,
+        manufacturer="Zentraly",
+        model="Boiler",
+    )
+    assert enriched.id == device.id
+    assert enriched.name_by_user == "Thermostat"
+    assert enriched.area_id == area.id
+
+
+@pytest.mark.parametrize("user_input", [{}, {CONF_NAME: "   "}])
+async def test_child_details_finish_without_edits(
+    child_details_flow: ChildFlowState,
+    device_registry: dr.DeviceRegistry,
+    user_input: dict[str, str],
+) -> None:
+    """Finishing without a custom name or area keeps the default identity."""
+    manager, flow_id, entry = child_details_flow
+    result = await manager.async_configure(flow_id, user_input)
+    assert result["reason"] == "child_added"
+    device = device_registry.async_get_device_by_identifier(
+        (DOMAIN, CHILD_DEVICE_ID), entry.entry_id
+    )
+    assert device.name == CHILD_DEVICE_ID
+    assert device.name_by_user is None
+    assert device.area_id is None
+    assert len(entry.subentries) == 1
+
+
+async def test_child_details_close(
+    child_details_flow: ChildFlowState,
+    device_registry: dr.DeviceRegistry,
+) -> None:
+    """Closing the optional form cannot undo the completed child installation."""
+    manager, flow_id, entry = child_details_flow
+    manager.async_abort(flow_id)
+    assert len(entry.subentries) == 1
+    device = device_registry.async_get_device_by_identifier(
+        (DOMAIN, CHILD_DEVICE_ID), entry.entry_id
+    )
+    assert device is not None
+    assert device.name == CHILD_DEVICE_ID
+    assert device.name_by_user is None
+
+
+async def test_child_details_deleted_area(
+    child_details_flow: ChildFlowState,
+    device_registry: dr.DeviceRegistry,
+) -> None:
+    """An obsolete area selection can be corrected without adding the child again."""
+    manager, flow_id, entry = child_details_flow
+    result = await manager.async_configure(
+        flow_id, {CONF_NAME: "Thermostat", "area_id": "deleted-area"}
+    )
+    assert result["errors"] == {"area_id": "invalid_area"}
+    assert len(entry.subentries) == 1
+    device = device_registry.async_get_device_by_identifier(
+        (DOMAIN, CHILD_DEVICE_ID), entry.entry_id
+    )
+    assert device.name_by_user is None
+    result = await manager.async_configure(flow_id, {CONF_NAME: "Thermostat"})
+    assert result["reason"] == "child_added"
+    assert device_registry.async_get(device.id).name_by_user == "Thermostat"
+
+
+async def test_child_details_removed_child(
+    hass: HomeAssistant,
+    child_details_flow: ChildFlowState,
+) -> None:
+    """Finishing an obsolete form cannot recreate a removed child."""
+    manager, flow_id, entry = child_details_flow
+    child = next(iter(entry.subentries.values()))
+    hass.config_entries.async_remove_subentry(entry, child.subentry_id)
+    result = await manager.async_configure(flow_id, {CONF_NAME: "Thermostat"})
+    assert result["reason"] == "child_unavailable"
+    assert not entry.subentries

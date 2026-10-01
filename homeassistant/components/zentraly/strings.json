@@ -3,6 +3,7 @@
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
       "child_added": "The Zentraly child device was added successfully.",
+      "child_unavailable": "The child device is no longer configured.",
       "entry_not_loaded": "The parent Zentraly device is not currently loaded.",
       "max_children": "This Zentraly device has reached the maximum number of child devices.",
       "no_available_parents": "No configured Zentraly devices can currently accept a child. The parent must be loaded, support child devices, and have available capacity.",
@@ -17,6 +18,7 @@
     "error": {
       "already_configured": "[%key:component::zentraly::config_subentries::device::error::already_configured%]",
       "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "invalid_area": "This area no longer exists. Select another area or clear the selection.",
       "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
       "invalid_device": "[%key:component::zentraly::config_subentries::device::error::invalid_device%]",
       "invalid_mac": "[%key:component::zentraly::config_subentries::device::error::invalid_mac%]",
@@ -49,6 +51,18 @@
         "description": "Enter the device ID and MAC address of the child to add to {parent}.",
         "title": "Add Zentraly child device"
       },
+      "child_details": {
+        "data": {
+          "area_id": "Area",
+          "name": "Device name"
+        },
+        "data_description": {
+          "area_id": "",
+          "name": ""
+        },
+        "submit": "Finish",
+        "title": "Name and assign"
+      },
       "user": {
         "data": {
           "parent": "Parent device"
@@ -56,22 +70,26 @@
         "data_description": {
           "parent": "The Zentraly device through which the child communicates."
         },
-        "description": "Select the parent device. Only configured devices that are loaded and have capacity for a supported child are listed.",
-        "title": "Add a Zentraly device as a child of\u2026"
+        "description": "Select the parent device.",
+        "title": "Add Zentraly child device"
       }
     }
   },
   "config_subentries": {
     "device": {
       "abort": {
+        "child_added": "The Zentraly child device was added successfully.",
+        "child_unavailable": "The child device is no longer configured.",
         "entry_not_loaded": "The parent Zentraly device is not currently loaded.",
         "max_children": "This Zentraly device has reached the maximum number of child devices.",
+        "parent_unavailable": "The selected parent is no longer available. Start again and select an available parent.",
         "unsupported_parent": "This Zentraly device does not support child devices."
       },
       "entry_type": "Device",
       "error": {
         "already_configured": "This device is already configured.",
         "cannot_connect": "Unable to communicate with the child device.",
+        "invalid_area": "This area no longer exists. Select another area or clear the selection.",
         "invalid_device": "The child device did not return a valid response.",
         "invalid_mac": "The MAC address is invalid.",
         "unsupported_child": "This device model cannot be added as a child of the selected Zentraly device.",
@@ -81,6 +99,18 @@
         "user": "Add device"
       },
       "step": {
+        "child_details": {
+          "data": {
+            "area_id": "Area",
+            "name": "Device name"
+          },
+          "data_description": {
+            "area_id": "",
+            "name": ""
+          },
+          "submit": "Finish",
+          "title": "Name and assign"
+        },
         "user": {
           "data": {
             "device_id": "Device ID",
