@@ -108,6 +108,8 @@ def _child_limit_reached(
     """Return whether a parent reached its child-device limit."""
 
     max_children = get_max_child_devices(parent_device_id)
+    if max_children is None:
+        return False
 
     child_count = len(
         entry.get_subentries_of_type(
@@ -133,8 +135,10 @@ def _parent_error(entry: ConfigEntry) -> str | None:
 def _normalize_mac(mac: str) -> str:
     """Normalize a child MAC address."""
     normalized_mac = mac.strip().lower().replace(":", "").replace("-", "")
-    if len(normalized_mac) != 12:
-        raise probatio.Invalid("MAC address must contain 12 hexadecimal characters")
+    if len(normalized_mac) not in (12, 16):
+        raise probatio.Invalid(
+            "MAC address must contain 12 or 16 hexadecimal characters"
+        )
     if any(character not in "0123456789abcdef" for character in normalized_mac):
         raise probatio.Invalid("MAC address must contain only hexadecimal characters")
     return normalized_mac

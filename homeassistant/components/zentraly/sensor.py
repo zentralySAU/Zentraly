@@ -47,6 +47,7 @@ _DIAGNOSTIC_CAPABILITIES = frozenset(
         SensorCapability.OUTPUT_TYPE,
         SensorCapability.RSSI,
         SensorCapability.WIFI_SIGNAL_POWER,
+        SensorCapability.BATTERY_LEVEL,
         SensorCapability.CH_SETPOINT,
         SensorCapability.MODULATION_LEVEL,
         SensorCapability.CH_WATER_PRESSURE,
@@ -144,6 +145,10 @@ class ZentralySensor(SensorEntity):
         ):
             self._attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
             self._attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
+
+        elif capability is SensorCapability.BATTERY_LEVEL:
+            self._attr_device_class = SensorDeviceClass.BATTERY
+            self._attr_native_unit_of_measurement = PERCENTAGE
 
         elif capability is SensorCapability.OUTPUT_TYPE:
             self._attr_device_class = SensorDeviceClass.ENUM
@@ -375,6 +380,9 @@ class ZentralySensor(SensorEntity):
 
         elif self._capability is SensorCapability.DHW_SETPOINT:
             value = await self._sensor_api.async_get_dhw_setpoint()
+
+        elif self._capability is SensorCapability.BATTERY_LEVEL:
+            value = await self._sensor_api.async_get_battery_level()
 
         else:
             return

@@ -569,6 +569,8 @@ async def test_child_device_success(
     [
         pytest.param("invalid-mac", id="length"),
         pytest.param("1020ba12316g", id="non-hex"),
+        pytest.param("4831B7FFFEC6078G", id="non-hex-64-bit"),
+        pytest.param("4831B7FFFEC607", id="unsupported-length"),
     ],
 )
 async def test_child_device_invalid_mac(
@@ -1150,6 +1152,73 @@ async def test_picker_child_validation_recovery(hass: HomeAssistant) -> None:
     )
     assert result["reason"] == "child_added"
     assert len(parent.subentries) == 1
+
+
+@pytest.mark.parametrize("model", ["ZTHZB", "ZTHG2", "ZTAAK"])
+async def test_unlimited_gateway_accepts_multiple_children(
+    hass: HomeAssistant, model: str
+) -> None:
+    """An unlimited gateway remains selectable after a child is configured."""
+    parent = _parent_entry(
+        subentries_data=[
+            {
+                "subentry_type": SUBENTRY_TYPE_DEVICE,
+                "title": "ZTTZB0100000001",
+                "unique_id": "ZTTZB0100000001",
+                "data": {CONF_DEVICE_ID: "ZTTZB0100000001", CONF_MAC: CHILD_MAC},
+            }
+        ]
+    )
+    parent.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        parent,
+        data={**parent.data, CONF_DEVICE_ID: model + "0100000001"},
+    )
+    validate = AsyncMock()
+    parent.runtime_data = SimpleNamespace(
+        api=SimpleNamespace(async_validate_child_device=validate)
+    )
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"parent": parent.entry_id}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_DEVICE_ID: "ZTEIE0100000002", CONF_MAC: "aabbccddee22"},
+    )
+    assert result["reason"] == "child_added"
+    assert len(parent.subentries) == 2
+    validate.assert_awaited_once_with("ZTEIE0100000002", "aabbccddee22")
+
+
+@pytest.mark.parametrize("mac", ["4831B7FFFEC60785", "48:31:B7:FF:FE:C6:07:85"])
+async def test_gateway_child_with_64_bit_address(hass: HomeAssistant, mac: str) -> None:
+    """Preserve all eight address bytes when validating and registering a child."""
+    parent = _parent_entry()
+    parent.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        parent, data={**parent.data, CONF_DEVICE_ID: "ZTHG20100000001"}
+    )
+    validate = AsyncMock()
+    parent.runtime_data = SimpleNamespace(
+        api=SimpleNamespace(async_validate_child_device=validate)
+    )
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {"parent": parent.entry_id}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {CONF_DEVICE_ID: "ZTTZB01JAY3PRQHQU", CONF_MAC: mac},
+    )
+    assert result["reason"] == "child_added"
+    validate.assert_awaited_once_with("ZTTZB01JAY3PRQHQU", "4831b7fffec60785")
+    child = next(iter(parent.subentries.values()))
+    assert child.data[CONF_MAC] == "4831b7fffec60785"
 
 
 async def test_picker_parent_removed(hass: HomeAssistant) -> None:
