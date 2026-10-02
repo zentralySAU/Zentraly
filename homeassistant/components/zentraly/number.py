@@ -186,13 +186,14 @@ class ZentralyNumber(NumberEntity):
             self._number_api.add_state_listener(self._handle_state_update)
         )
 
-        self.async_on_remove(
-            async_track_time_interval(
-                self.hass,
-                self._async_periodic_refresh,
-                SCAN_INTERVAL,
+        if self._device.supports_periodic_polling:
+            self.async_on_remove(
+                async_track_time_interval(
+                    self.hass,
+                    self._async_periodic_refresh,
+                    SCAN_INTERVAL,
+                )
             )
-        )
 
         self.async_on_remove(self._cancel_pending_timer_write)
         self.async_schedule_update_ha_state(force_refresh=True)

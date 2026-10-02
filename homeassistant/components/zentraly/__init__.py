@@ -178,13 +178,14 @@ def _register_device_info_polling(
     entry.async_on_unload(
         device.add_connection_state_listener(_async_connection_changed)
     )
-    entry.async_on_unload(
-        async_track_time_interval(
-            hass,
-            _async_schedule_device_info_refresh,
-            DEVICE_INFO_INTERVAL,
+    if device.supports_periodic_polling:
+        entry.async_on_unload(
+            async_track_time_interval(
+                hass,
+                _async_schedule_device_info_refresh,
+                DEVICE_INFO_INTERVAL,
+            )
         )
-    )
     _async_schedule_device_info_refresh()
 
 
