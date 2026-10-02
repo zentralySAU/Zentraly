@@ -19,11 +19,12 @@ from homeassistant.const import (
     UnitOfVolumeFlowRate,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
-from .const import SCAN_INTERVAL
+from .const import DOMAIN, SCAN_INTERVAL
 from .models import ZentralyConfigEntry, ZentralyDevice
 
 PARALLEL_UPDATES = 0
@@ -80,6 +81,10 @@ def _create_sensor_entities(
         )
         for capability in SensorCapability
         if sensor_api.supports(capability)
+        and not (
+            device.via_device_id is not None
+            and capability is SensorCapability.WIFI_SIGNAL_POWER
+        )
     ]
 
 
@@ -99,7 +104,18 @@ async def async_setup_entry(
             parent_entities,
         )
 
+    entity_registry = er.async_get(hass)
     for subentry_id, child in entry.runtime_data.children.items():
+        if entity_id := entity_registry.async_get_entity_id(
+            "sensor", DOMAIN, f"{child.device_id}_wifi_signal_power"
+        ):
+            registry_entry = entity_registry.entities[entity_id]
+            if (
+                registry_entry.config_entry_id == entry.entry_id
+                and registry_entry.config_subentry_id == subentry_id
+            ):
+                entity_registry.async_remove(entity_id)
+
         child_entities = _create_sensor_entities(
             child,
         )
@@ -210,13 +226,14 @@ class ZentralySensor(SensorEntity):
         )
 
         if self._capability not in _REPORT_ONLY_CAPABILITIES:
-            self.async_on_remove(
-                async_track_time_interval(
-                    self.hass,
-                    self._async_periodic_refresh,
-                    SCAN_INTERVAL,
+            if self._device.supports_periodic_polling:
+                self.async_on_remove(
+                    async_track_time_interval(
+                        self.hass,
+                        self._async_periodic_refresh,
+                        SCAN_INTERVAL,
+                    )
                 )
-            )
 
             self.async_schedule_update_ha_state(force_refresh=True)
 

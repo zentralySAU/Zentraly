@@ -1,5 +1,6 @@
 """Registration and service behavior for gateway and new configuration entities."""
 
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,8 +9,9 @@ from zentraly import NumberCapability, SensorCapability, SwitchCapability
 from homeassistant.const import ATTR_ENTITY_ID, CONF_DEVICE_ID, EntityCategory, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util import dt as dt_util
 
-from tests.common import MockConfigEntry
+from tests.common import MockConfigEntry, async_fire_time_changed
 
 
 @pytest.mark.usefixtures("mock_device_info")
@@ -154,6 +156,10 @@ async def test_battery_sensor(
         assert state.state == "75"
         assert state.attributes["device_class"] == "battery"
         assert state.attributes["unit_of_measurement"] == "%"
+        api.async_get_battery_level.assert_awaited_once()
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=5))
+        await hass.async_block_till_done()
+        api.async_get_battery_level.assert_awaited_once()
         api.add_state_listener.call_args.args[0]({SensorCapability.BATTERY_LEVEL: 0})
         assert hass.states.get(entity.entity_id).state == "0"
 

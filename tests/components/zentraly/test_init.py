@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 from zentraly import (
@@ -751,8 +751,9 @@ async def test_refresh_device_info(
         assert read_info.await_count == 3
 
 
+@pytest.mark.parametrize("periodic_polling", [True, False])
 async def test_device_info_periodic_refresh(
-    hass: HomeAssistant, device_registry: dr.DeviceRegistry
+    hass: HomeAssistant, device_registry: dr.DeviceRegistry, periodic_polling: bool
 ) -> None:
     """Run the scheduled public version read and cancel it when unloading."""
     entry = _parent_entry()
@@ -765,6 +766,11 @@ async def test_device_info_periodic_refresh(
     api.port = PORT
     api.async_validate_password.return_value = PARENT_MAC
     with (
+        patch(
+            "homeassistant.components.zentraly.models.ZentralyDevice.supports_periodic_polling",
+            new_callable=PropertyMock,
+            return_value=periodic_polling,
+        ),
         patch("homeassistant.components.zentraly.ZentralyApi", return_value=api),
         patch.object(hass.config_entries, "async_forward_entry_setups"),
         patch(
@@ -782,7 +788,7 @@ async def test_device_info_periodic_refresh(
         read_info.assert_not_awaited()
         async_fire_time_changed(hass, now + timedelta(hours=24))
         await hass.async_block_till_done()
-        read_info.assert_awaited_once_with()
+        assert read_info.await_count == int(periodic_polling)
         registered = device_registry.async_get_device_by_identifier(
             (DOMAIN, PARENT_DEVICE_ID), entry.entry_id
         )
@@ -791,7 +797,7 @@ async def test_device_info_periodic_refresh(
         assert await hass.config_entries.async_unload(entry.entry_id)
         async_fire_time_changed(hass, now + timedelta(hours=48))
         await hass.async_block_till_done()
-        read_info.assert_awaited_once_with()
+        assert read_info.await_count == int(periodic_polling)
 
 
 @pytest.mark.parametrize(
@@ -843,8 +849,11 @@ async def test_partial_device_info_after_restart(
     [19.0, ZentralyConnectionError()],
     ids=["success", "connection-error"],
 )
+@pytest.mark.parametrize("periodic_polling", [True, False])
 async def test_climate_periodic_refresh_lifecycle(
-    hass: HomeAssistant, initial_read: float | ZentralyConnectionError
+    hass: HomeAssistant,
+    initial_read: float | ZentralyConnectionError,
+    periodic_polling: bool,
 ) -> None:
     """Refresh climate every five minutes and cancel polling when unloading."""
     entry = _parent_entry()
@@ -871,6 +880,11 @@ async def test_climate_periodic_refresh_lifecycle(
     climate_api.async_set_operation_mode.return_value = True
     with (
         patch(
+            "homeassistant.components.zentraly.models.ZentralyDevice.supports_periodic_polling",
+            new_callable=PropertyMock,
+            return_value=periodic_polling,
+        ),
+        patch(
             "homeassistant.components.zentraly.get_device_platforms",
             return_value=[Platform.CLIMATE],
         ),
@@ -891,11 +905,15 @@ async def test_climate_periodic_refresh_lifecycle(
         climate_api.async_get_current_temperature.assert_not_awaited()
         async_fire_time_changed(hass, now + timedelta(minutes=5))
         await hass.async_block_till_done()
-        climate_api.async_get_current_temperature.assert_awaited_once_with()
+        assert climate_api.async_get_current_temperature.await_count == int(
+            periodic_polling
+        )
         assert await hass.config_entries.async_unload(entry.entry_id)
         async_fire_time_changed(hass, now + timedelta(minutes=10))
         await hass.async_block_till_done()
-        climate_api.async_get_current_temperature.assert_awaited_once_with()
+        assert climate_api.async_get_current_temperature.await_count == int(
+            periodic_polling
+        )
 
 
 async def test_setup_failure_disconnects(hass: HomeAssistant) -> None:

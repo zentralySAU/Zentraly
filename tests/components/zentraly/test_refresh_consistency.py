@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 from zentraly import (
@@ -155,12 +155,19 @@ TIMER_CASE = StateCase(
 
 
 @pytest.fixture
+def periodic_polling() -> bool:
+    """Keep periodic reads enabled unless a test overrides the model policy."""
+    return True
+
+
+@pytest.fixture
 async def state_entity(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
     mock_api: MagicMock,
     mock_device_info: AsyncMock,
     state_case: StateCase,
+    periodic_polling: bool,
 ) -> AsyncIterator[tuple[str, MagicMock]]:
     """Load a real platform while mocking only its public library API."""
     device_id = f"{state_case.model}0100000001"
@@ -171,6 +178,11 @@ async def state_entity(
     )
     mock_api.device_id = device_id
     with (
+        patch(
+            "homeassistant.components.zentraly.models.ZentralyDevice.supports_periodic_polling",
+            new_callable=PropertyMock,
+            return_value=periodic_polling,
+        ),
         patch(
             "homeassistant.components.zentraly.get_device_platforms",
             return_value=frozenset({state_case.platform}),
@@ -345,3 +357,30 @@ async def test_action_waits_for_read(
     await hass.async_block_till_done()
     setter.assert_awaited_once()
     assert hass.states.get(entity_id).state == state_case.report_state
+
+
+@pytest.mark.parametrize("state_case", CASES)
+@pytest.mark.parametrize("periodic_polling", [True, False])
+async def test_periodic_read_policy(
+    hass: HomeAssistant,
+    state_case: StateCase,
+    state_entity: tuple[str, MagicMock],
+    periodic_polling: bool,
+    connection_state: Callable[[bool], None],
+) -> None:
+    """Suppress only recurring reads; initial, report and reconnect paths work."""
+    entity_id, api = state_entity
+    getter = getattr(api, state_case.getter)
+    getter.assert_awaited_once()
+    getter.reset_mock()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=5))
+    await hass.async_block_till_done()
+    assert getter.await_count == int(periodic_polling)
+    api.add_state_listener.call_args.args[0]({state_case.capability: state_case.report})
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == state_case.report_state
+    getter.reset_mock()
+    connection_state(True)
+    await hass.async_block_till_done()
+    getter.assert_awaited_once()
+    assert hass.states.get(entity_id).state == state_case.initial_state
