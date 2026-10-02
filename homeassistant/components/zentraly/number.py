@@ -36,6 +36,8 @@ _CONFIG_CAPABILITIES = frozenset(
         NumberCapability.AWAY_TEMPERATURE,
         NumberCapability.TEMPERATURE_OFFSET,
         NumberCapability.DISPLAY_BRIGHTNESS,
+        NumberCapability.BOILER_IGNITION_DELAY,
+        NumberCapability.BOILER_SHUTDOWN_DELAY,
         NumberCapability.TIMER,
         NumberCapability.TIMER_OFF,
         NumberCapability.HIGH_VOLTAGE_LIMIT,
@@ -151,7 +153,12 @@ class ZentralyNumber(NumberEntity):
         elif capability is NumberCapability.DISPLAY_BRIGHTNESS:
             self._attr_native_unit_of_measurement = PERCENTAGE
 
-        elif capability in (NumberCapability.TIMER, NumberCapability.TIMER_OFF):
+        elif capability in (
+            NumberCapability.TIMER,
+            NumberCapability.TIMER_OFF,
+            NumberCapability.BOILER_IGNITION_DELAY,
+            NumberCapability.BOILER_SHUTDOWN_DELAY,
+        ):
             self._attr_native_unit_of_measurement = UnitOfTime.MINUTES
 
         elif capability in (
@@ -179,13 +186,14 @@ class ZentralyNumber(NumberEntity):
             self._number_api.add_state_listener(self._handle_state_update)
         )
 
-        self.async_on_remove(
-            async_track_time_interval(
-                self.hass,
-                self._async_periodic_refresh,
-                SCAN_INTERVAL,
+        if self._device.supports_periodic_polling:
+            self.async_on_remove(
+                async_track_time_interval(
+                    self.hass,
+                    self._async_periodic_refresh,
+                    SCAN_INTERVAL,
+                )
             )
-        )
 
         self.async_on_remove(self._cancel_pending_timer_write)
         self.async_schedule_update_ha_state(force_refresh=True)
@@ -354,6 +362,12 @@ class ZentralyNumber(NumberEntity):
         elif self._capability is NumberCapability.DISPLAY_BRIGHTNESS:
             value = await self._number_api.async_get_display_brightness()
 
+        elif self._capability is NumberCapability.BOILER_IGNITION_DELAY:
+            value = await self._number_api.async_get_boiler_ignition_delay()
+
+        elif self._capability is NumberCapability.BOILER_SHUTDOWN_DELAY:
+            value = await self._number_api.async_get_boiler_shutdown_delay()
+
         elif self._capability is NumberCapability.HIGH_VOLTAGE_LIMIT:
             value = await self._number_api.async_get_high_voltage_limit()
 
@@ -410,6 +424,12 @@ class ZentralyNumber(NumberEntity):
 
         elif self._capability is NumberCapability.DISPLAY_BRIGHTNESS:
             success = await self._number_api.async_set_display_brightness(value)
+
+        elif self._capability is NumberCapability.BOILER_IGNITION_DELAY:
+            success = await self._number_api.async_set_boiler_ignition_delay(value)
+
+        elif self._capability is NumberCapability.BOILER_SHUTDOWN_DELAY:
+            success = await self._number_api.async_set_boiler_shutdown_delay(value)
 
         elif self._capability is NumberCapability.HIGH_VOLTAGE_LIMIT:
             success = await self._number_api.async_set_high_voltage_limit(value)

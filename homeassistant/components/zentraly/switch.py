@@ -30,6 +30,7 @@ _CONFIG_CAPABILITIES = frozenset(
         SwitchCapability.CHILD_LOCK,
         SwitchCapability.ALWAYS_ON_DISPLAY,
         SwitchCapability.ALWAYS_ON_LED,
+        SwitchCapability.DISCONNECT_ON_ERROR,
         SwitchCapability.COMFORT_MODE,
         SwitchCapability.FORCED_MODE,
         SwitchCapability.RETURN_TO_CRONO,
@@ -140,13 +141,14 @@ class ZentralySwitch(SwitchEntity):
             self._switch_api.add_state_listener(self._handle_state_update)
         )
 
-        self.async_on_remove(
-            async_track_time_interval(
-                self.hass,
-                self._async_periodic_refresh,
-                SCAN_INTERVAL,
+        if self._device.supports_periodic_polling:
+            self.async_on_remove(
+                async_track_time_interval(
+                    self.hass,
+                    self._async_periodic_refresh,
+                    SCAN_INTERVAL,
+                )
             )
-        )
 
         self.async_schedule_update_ha_state(force_refresh=True)
 
@@ -256,6 +258,9 @@ class ZentralySwitch(SwitchEntity):
         elif self._capability is SwitchCapability.ALWAYS_ON_LED:
             value = await self._switch_api.async_get_always_on_led()
 
+        elif self._capability is SwitchCapability.DISCONNECT_ON_ERROR:
+            value = await self._switch_api.async_get_disconnect_on_error()
+
         elif self._capability is SwitchCapability.COMFORT_MODE:
             value = await self._switch_api.async_get_comfort_mode()
 
@@ -343,6 +348,9 @@ class ZentralySwitch(SwitchEntity):
 
         if self._capability is SwitchCapability.ALWAYS_ON_LED:
             return await self._switch_api.async_set_always_on_led(enabled)
+
+        if self._capability is SwitchCapability.DISCONNECT_ON_ERROR:
+            return await self._switch_api.async_set_disconnect_on_error(enabled)
 
         if self._capability is SwitchCapability.COMFORT_MODE:
             return await self._switch_api.async_set_comfort_mode(enabled)

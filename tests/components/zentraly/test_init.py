@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 from zentraly import (
@@ -751,8 +751,9 @@ async def test_refresh_device_info(
         assert read_info.await_count == 3
 
 
+@pytest.mark.parametrize("periodic_polling", [True, False])
 async def test_device_info_periodic_refresh(
-    hass: HomeAssistant, device_registry: dr.DeviceRegistry
+    hass: HomeAssistant, device_registry: dr.DeviceRegistry, periodic_polling: bool
 ) -> None:
     """Run the scheduled public version read and cancel it when unloading."""
     entry = _parent_entry()
@@ -765,6 +766,11 @@ async def test_device_info_periodic_refresh(
     api.port = PORT
     api.async_validate_password.return_value = PARENT_MAC
     with (
+        patch(
+            "homeassistant.components.zentraly.models.ZentralyDevice.supports_periodic_polling",
+            new_callable=PropertyMock,
+            return_value=periodic_polling,
+        ),
         patch("homeassistant.components.zentraly.ZentralyApi", return_value=api),
         patch.object(hass.config_entries, "async_forward_entry_setups"),
         patch(
@@ -782,7 +788,7 @@ async def test_device_info_periodic_refresh(
         read_info.assert_not_awaited()
         async_fire_time_changed(hass, now + timedelta(hours=24))
         await hass.async_block_till_done()
-        read_info.assert_awaited_once_with()
+        assert read_info.await_count == int(periodic_polling)
         registered = device_registry.async_get_device_by_identifier(
             (DOMAIN, PARENT_DEVICE_ID), entry.entry_id
         )
@@ -791,7 +797,7 @@ async def test_device_info_periodic_refresh(
         assert await hass.config_entries.async_unload(entry.entry_id)
         async_fire_time_changed(hass, now + timedelta(hours=48))
         await hass.async_block_till_done()
-        read_info.assert_awaited_once_with()
+        assert read_info.await_count == int(periodic_polling)
 
 
 @pytest.mark.parametrize(
@@ -843,8 +849,11 @@ async def test_partial_device_info_after_restart(
     [19.0, ZentralyConnectionError()],
     ids=["success", "connection-error"],
 )
+@pytest.mark.parametrize("periodic_polling", [True, False])
 async def test_climate_periodic_refresh_lifecycle(
-    hass: HomeAssistant, initial_read: float | ZentralyConnectionError
+    hass: HomeAssistant,
+    initial_read: float | ZentralyConnectionError,
+    periodic_polling: bool,
 ) -> None:
     """Refresh climate every five minutes and cancel polling when unloading."""
     entry = _parent_entry()
@@ -871,6 +880,11 @@ async def test_climate_periodic_refresh_lifecycle(
     climate_api.async_set_operation_mode.return_value = True
     with (
         patch(
+            "homeassistant.components.zentraly.models.ZentralyDevice.supports_periodic_polling",
+            new_callable=PropertyMock,
+            return_value=periodic_polling,
+        ),
+        patch(
             "homeassistant.components.zentraly.get_device_platforms",
             return_value=[Platform.CLIMATE],
         ),
@@ -891,11 +905,15 @@ async def test_climate_periodic_refresh_lifecycle(
         climate_api.async_get_current_temperature.assert_not_awaited()
         async_fire_time_changed(hass, now + timedelta(minutes=5))
         await hass.async_block_till_done()
-        climate_api.async_get_current_temperature.assert_awaited_once_with()
+        assert climate_api.async_get_current_temperature.await_count == int(
+            periodic_polling
+        )
         assert await hass.config_entries.async_unload(entry.entry_id)
         async_fire_time_changed(hass, now + timedelta(minutes=10))
         await hass.async_block_till_done()
-        climate_api.async_get_current_temperature.assert_awaited_once_with()
+        assert climate_api.async_get_current_temperature.await_count == int(
+            periodic_polling
+        )
 
 
 async def test_setup_failure_disconnects(hass: HomeAssistant) -> None:
@@ -967,3 +985,64 @@ async def test_device_info_connection_and_unload(hass: HomeAssistant) -> None:
         assert await hass.config_entries.async_unload(entry.entry_id)
         assert cancelled.is_set()
         api.add_connection_state_listener.return_value.assert_called_once_with()
+
+
+@pytest.mark.usefixtures("mock_device_info")
+async def test_remove_gateway_removes_children(
+    hass: HomeAssistant,
+    device_registry: dr.DeviceRegistry,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    """Removing a gateway cleans up every child device and its entities."""
+    entry = _parent_entry(
+        subentries_data=[
+            {
+                "subentry_type": SUBENTRY_TYPE_DEVICE,
+                "title": device_id,
+                "unique_id": device_id,
+                "data": {CONF_DEVICE_ID: device_id, CONF_MAC: mac},
+            }
+            for device_id, mac in (
+                ("ZTTZB0100000001", "4831b7fffec60785"),
+                ("ZTTZB0100000002", "4831b7fffec60786"),
+            )
+        ]
+    )
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_DEVICE_ID: "ZTHG20100000001"}
+    )
+    with (
+        patch(
+            "homeassistant.components.zentraly.ZentralyApi.async_validate_password",
+            return_value=PARENT_MAC,
+        ),
+        patch("homeassistant.components.zentraly.ZentralyApi.async_connect"),
+        patch.object(hass.config_entries, "async_forward_entry_setups"),
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    devices = dr.async_entries_for_config_entry(device_registry, entry.entry_id)
+    assert len(devices) == 3
+    entities = [
+        entity_registry.async_get_or_create(
+            "sensor",
+            DOMAIN,
+            f"{child.device_id}_battery_level",
+            config_entry=entry,
+            config_subentry_id=subentry_id,
+            device_id=device_registry.async_get_device_by_identifier(
+                (DOMAIN, child.device_id), entry.entry_id
+            ).id,
+        )
+        for subentry_id, child in entry.runtime_data.children.items()
+    ]
+    with patch.object(hass.config_entries, "async_unload_platforms", return_value=True):
+        result = await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert result == {"require_restart": False}
+    assert hass.config_entries.async_get_entry(entry.entry_id) is None
+    assert all(device_registry.async_get(device.id) is None for device in devices)
+    assert all(
+        entity_registry.async_get(entity.entity_id) is None for entity in entities
+    )
