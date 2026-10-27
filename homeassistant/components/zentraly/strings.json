@@ -142,6 +142,9 @@
       }
     },
     "button": {
+      "refresh_device_info": {
+        "name": "Refresh device information"
+      },
       "reset_boiler": {
         "name": "Reset boiler"
       },
@@ -329,6 +332,12 @@
     "connection_busy": {
       "message": "The Zentraly connection is busy. Please try again later."
     },
+    "firmware_read_failed": {
+      "message": "Could not read firmware version."
+    },
+    "hardware_read_failed": {
+      "message": "Could not read hardware version."
+    },
     "invalid_action": {
       "message": "The requested value or operation is not supported by this device."
     },
@@ -352,6 +361,9 @@
     },
     "unsupported_model": {
       "message": "The Zentraly device with ID {device_id} is not supported."
+    },
+    "versions_read_failed": {
+      "message": "Could not read firmware or hardware version."
     }
   }
 }

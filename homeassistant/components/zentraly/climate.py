@@ -1,7 +1,6 @@
 """Climate platform for Zentraly."""
 
 import asyncio
-from datetime import datetime
 from typing import Any, override
 
 from zentraly import ClimateCapability, ClimateOperationMode, ZentralyClimateApi
@@ -20,11 +19,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.event import async_track_time_interval
 
 from .actions import translate_action_errors
-from .const import DOMAIN, SCAN_INTERVAL
+from .const import DOMAIN, SCAN_INTERVAL as DEFAULT_SCAN_INTERVAL
 from .models import ZentralyConfigEntry, ZentralyDevice
+
+SCAN_INTERVAL = DEFAULT_SCAN_INTERVAL
 
 PARALLEL_UPDATES = 1
 
@@ -63,7 +63,6 @@ class ZentralyClimate(ClimateEntity):
     """Representation of a Zentraly thermostat."""
 
     _attr_has_entity_name = True
-    _attr_should_poll = False
 
     def __init__(
         self,
@@ -80,22 +79,19 @@ class ZentralyClimate(ClimateEntity):
         self._attr_unique_id = device.device_id
         self._attr_name = None
 
-        self._attr_temperature_unit = UnitOfTemperature.CELSIUS
+        self._attr_native_temperature_unit = UnitOfTemperature.CELSIUS
 
-        self._attr_target_temperature_step = self._configuration.temperature_step
         self._attr_min_temp = self._configuration.minimum_temperature
         self._attr_max_temp = self._configuration.maximum_temperature
 
-        self._attr_current_temperature = None
+        self._attr_native_current_temperature = None
         self._attr_current_humidity = None
-        self._attr_target_temperature = None
+        self._attr_native_target_temperature = None
 
         self._attr_hvac_mode = None
         self._attr_hvac_action = None
         self._attr_preset_mode = PRESET_NONE
 
-        self._normal_target_temperature: float | None = None
-        self._away_temperature: float | None = None
         self._heat_demand: bool | None = None
         self._report_versions: dict[ClimateCapability, int] = {}
 
@@ -117,24 +113,21 @@ class ZentralyClimate(ClimateEntity):
             self._climate_api.add_state_listener(self._handle_state_update)
         )
 
-        if self._device.supports_periodic_polling:
-            self.async_on_remove(
-                async_track_time_interval(
-                    self.hass,
-                    self._async_periodic_refresh,
-                    SCAN_INTERVAL,
-                )
-            )
-
         self.async_schedule_update_ha_state(force_refresh=True)
 
-    async def _async_periodic_refresh(
-        self,
-        now: datetime,
-    ) -> None:
-        """Refresh device state periodically as a synchronization fallback."""
+    @property
+    @override
+    def target_temperature_step(self) -> float:
+        """Offer whole Fahrenheit steps while writing native Celsius steps."""
+        if self.hass.config.units.temperature_unit is UnitOfTemperature.FAHRENHEIT:
+            return 1
+        return self._configuration.temperature_step
 
-        self.async_schedule_update_ha_state(force_refresh=True)
+    @property
+    @override
+    def should_poll(self) -> bool:
+        """Use Home Assistant polling only when the device permits it."""
+        return self._device.supports_periodic_polling
 
     @property
     @override
@@ -164,22 +157,15 @@ class ZentralyClimate(ClimateEntity):
             value = updates[ClimateCapability.LOCAL_TEMPERATURE]
 
             if isinstance(value, int | float):
-                self._attr_current_temperature = float(value)
+                self._attr_native_current_temperature = float(value)
                 self._record_report(ClimateCapability.LOCAL_TEMPERATURE)
 
         if ClimateCapability.TARGET_TEMPERATURE in updates:
             value = updates[ClimateCapability.TARGET_TEMPERATURE]
 
             if isinstance(value, int | float):
-                self._normal_target_temperature = float(value)
+                self._attr_native_target_temperature = float(value)
                 self._record_report(ClimateCapability.TARGET_TEMPERATURE)
-
-        if ClimateCapability.AWAY_TEMPERATURE in updates:
-            value = updates[ClimateCapability.AWAY_TEMPERATURE]
-
-            if isinstance(value, int | float):
-                self._away_temperature = float(value)
-                self._record_report(ClimateCapability.AWAY_TEMPERATURE)
 
         if ClimateCapability.OPERATION_MODE in updates:
             value = updates[ClimateCapability.OPERATION_MODE]
@@ -202,7 +188,6 @@ class ZentralyClimate(ClimateEntity):
                 self._attr_current_humidity = float(value)
                 self._record_report(ClimateCapability.HUMIDITY)
 
-        self._update_target_temperature()
         self._update_hvac_action()
 
         self.async_write_ha_state()
@@ -221,6 +206,10 @@ class ZentralyClimate(ClimateEntity):
 
         if self._climate_api.supports(ClimateCapability.OPERATION_MODE):
             modes = self._configuration.operation_modes
+            if ClimateOperationMode.MANUAL in modes:
+                supported_features |= ClimateEntityFeature.TURN_ON
+            if ClimateOperationMode.OFF in modes:
+                supported_features |= ClimateEntityFeature.TURN_OFF
             self._attr_hvac_modes = [
                 hvac_mode
                 for operation_mode, hvac_mode in (
@@ -269,12 +258,6 @@ class ZentralyClimate(ClimateEntity):
             else None
         )
 
-        away_temperature_task = (
-            asyncio.create_task(self._climate_api.async_get_away_temperature())
-            if self._climate_api.supports(ClimateCapability.AWAY_TEMPERATURE)
-            else None
-        )
-
         operation_mode_task = (
             asyncio.create_task(self._climate_api.async_get_operation_mode())
             if self._climate_api.supports(ClimateCapability.OPERATION_MODE)
@@ -298,7 +281,6 @@ class ZentralyClimate(ClimateEntity):
             for task in (
                 current_temperature_task,
                 target_temperature_task,
-                away_temperature_task,
                 operation_mode_task,
                 heat_demand_task,
                 humidity_task,
@@ -320,21 +302,14 @@ class ZentralyClimate(ClimateEntity):
         ) == report_versions.get(ClimateCapability.LOCAL_TEMPERATURE, 0):
             current_temperature = current_temperature_task.result()
 
-            self._attr_current_temperature = current_temperature
+            self._attr_native_current_temperature = current_temperature
 
         if target_temperature_task is not None and self._report_versions.get(
             ClimateCapability.TARGET_TEMPERATURE, 0
         ) == report_versions.get(ClimateCapability.TARGET_TEMPERATURE, 0):
             target_temperature = target_temperature_task.result()
 
-            self._normal_target_temperature = target_temperature
-
-        if away_temperature_task is not None and self._report_versions.get(
-            ClimateCapability.AWAY_TEMPERATURE, 0
-        ) == report_versions.get(ClimateCapability.AWAY_TEMPERATURE, 0):
-            away_temperature = away_temperature_task.result()
-
-            self._away_temperature = away_temperature
+            self._attr_native_target_temperature = target_temperature
 
         if operation_mode_task is not None and self._report_versions.get(
             ClimateCapability.OPERATION_MODE, 0
@@ -357,7 +332,6 @@ class ZentralyClimate(ClimateEntity):
 
             self._attr_current_humidity = humidity
 
-        self._update_target_temperature()
         self._update_hvac_action()
 
     def _apply_operation_mode(
@@ -390,19 +364,6 @@ class ZentralyClimate(ClimateEntity):
             self._attr_hvac_mode = HVACMode.HEAT
             self._attr_preset_mode = PRESET_AWAY
 
-    def _update_target_temperature(self) -> None:
-        """Update the displayed target temperature."""
-
-        if self._attr_preset_mode == PRESET_AWAY:
-            self._attr_target_temperature = (
-                self._away_temperature
-                if self._away_temperature is not None
-                else self._normal_target_temperature
-            )
-            return
-
-        self._attr_target_temperature = self._normal_target_temperature
-
     def _update_hvac_action(self) -> None:
         """Update HVAC action from mode and heat demand."""
 
@@ -434,7 +395,8 @@ class ZentralyClimate(ClimateEntity):
                 translation_domain=DOMAIN, translation_key="invalid_action"
             )
 
-        temperature = kwargs[ATTR_TEMPERATURE]
+        step = self._configuration.temperature_step
+        temperature = round(float(kwargs[ATTR_TEMPERATURE]) / step) * step
 
         success = await self._climate_api.async_set_target_temperature(
             float(temperature)
@@ -445,7 +407,7 @@ class ZentralyClimate(ClimateEntity):
                 translation_domain=DOMAIN, translation_key="action_failed"
             )
 
-        self._normal_target_temperature = float(temperature)
+        self._attr_native_target_temperature = float(temperature)
 
         if (
             self._climate_api.supports(ClimateCapability.OPERATION_MODE)
@@ -453,7 +415,6 @@ class ZentralyClimate(ClimateEntity):
         ):
             self._apply_operation_mode(self._configuration.mode_after_setpoint)
 
-        self._update_target_temperature()
         self._update_hvac_action()
 
         self.async_write_ha_state()
@@ -492,7 +453,6 @@ class ZentralyClimate(ClimateEntity):
             )
 
         self._apply_operation_mode(operation_mode)
-        self._update_target_temperature()
         self._update_hvac_action()
 
         self.async_write_ha_state()
@@ -524,7 +484,6 @@ class ZentralyClimate(ClimateEntity):
             )
 
         self._apply_operation_mode(operation_mode)
-        self._update_target_temperature()
         self._update_hvac_action()
 
         self.async_write_ha_state()

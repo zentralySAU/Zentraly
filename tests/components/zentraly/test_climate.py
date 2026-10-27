@@ -7,9 +7,10 @@ from dataclasses import replace
 from datetime import timedelta
 import logging
 from typing import Any
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 from zentraly import (
     ClimateCapability,
     ClimateConfiguration,
@@ -31,6 +32,7 @@ from homeassistant.components.climate import (
     ATTR_HVAC_ACTION,
     ATTR_HVAC_MODE,
     ATTR_PRESET_MODE,
+    ATTR_TARGET_TEMP_STEP,
     PRESET_AWAY,
     PRESET_NONE,
     ClimateEntityFeature,
@@ -45,12 +47,14 @@ from homeassistant.const import (
     ATTR_TEMPERATURE,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
+    Platform,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity import Entity
-from homeassistant.helpers.entity_component import EntityComponent
+from homeassistant.helpers.entity_component import EntityComponent, async_update_entity
 from homeassistant.util import dt as dt_util
+from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
 from .conftest import ENTITY_ID
 from .helpers import (
@@ -58,8 +62,6 @@ from .helpers import (
     async_check_capability_action_errors,
     async_check_platform_device_availability,
 )
-
-from tests.common import MockConfigEntry, async_fire_time_changed
 
 
 @pytest.mark.usefixtures("setup_integration")
@@ -147,7 +149,7 @@ async def test_missing_readings_clear_previous_values(
     mock_climate_api.async_get_humidity.return_value = None
     mock_climate_api.async_get_heat_demand.return_value = None
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=5))
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     state = hass.states.get(ENTITY_ID)
     assert state.state == STATE_UNKNOWN
     assert state.attributes[ATTR_CURRENT_TEMPERATURE] is None
@@ -304,7 +306,7 @@ async def test_periodic_refresh_during_reconnect(
         release.set()
         await hass.async_block_till_done()
     async_fire_time_changed(hass, now + timedelta(minutes=10))
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert mock_climate_api.async_get_current_temperature.await_count == 2
     assert hass.states.get(ENTITY_ID).attributes[ATTR_CURRENT_TEMPERATURE] == 20.0
 
@@ -372,7 +374,7 @@ async def test_unload(
     mock_climate_api.add_state_listener.return_value.assert_called_once_with()
     assert mock_api.add_connection_state_listener.return_value.call_count == 2
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=5))
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert mock_climate_api.async_get_current_temperature.await_count == reads
     assert hass.states.get(ENTITY_ID).state == STATE_UNAVAILABLE
 
@@ -445,7 +447,7 @@ async def test_temperature_with_unsupported_mode(
     ("operation_mode", "target", "hvac_mode"),
     [
         pytest.param(ClimateOperationMode.AUTO, 24.0, HVACMode.AUTO, id="normal"),
-        pytest.param(ClimateOperationMode.AWAY, 18.0, HVACMode.HEAT, id="away"),
+        pytest.param(ClimateOperationMode.AWAY, 24.0, HVACMode.HEAT, id="away"),
     ],
 )
 async def test_report_during_refresh(
@@ -500,19 +502,19 @@ async def test_report_during_refresh(
 
 
 @pytest.mark.usefixtures("setup_integration")
-async def test_separate_away_temperature(
+async def test_away_uses_reported_target(
     hass: HomeAssistant,
     mock_climate_api: MagicMock,
     connection_state: Callable[[bool], None],
 ) -> None:
-    """Models with a separate Away reading preserve their normal setpoint."""
+    """Away configuration never replaces the effective target reading."""
     mock_climate_api.supports.side_effect = None
     mock_climate_api.supports.return_value = True
     mock_climate_api.async_get_away_temperature.return_value = 17.0
     mock_climate_api.async_get_operation_mode.return_value = ClimateOperationMode.AWAY
     connection_state(True)
     await hass.async_block_till_done()
-    assert hass.states.get(ENTITY_ID).attributes[ATTR_TEMPERATURE] == 17.0
+    assert hass.states.get(ENTITY_ID).attributes[ATTR_TEMPERATURE] == 21.0
 
     await hass.services.async_call(
         "climate",
@@ -572,7 +574,7 @@ async def test_capability_action_errors(
     await async_check_capability_action_errors(device_id, action, response, error)
 
 
-@pytest.mark.parametrize("model", ["ZTTWZ", "ZTTIN"])
+@pytest.mark.parametrize("model", ["ZTTWZ", "ZTTIN", "ZTREA"])
 async def test_climate_away_report(hass: HomeAssistant, model: str) -> None:
     """Climate uses the reported target in away and ignores its configuration value."""
     api = ZentralyApi("192.168.1.42", 80, "password", f"{model}0100000001")
@@ -640,11 +642,12 @@ async def test_model_validation() -> None:
         pytest.param("ZTREA", id="ztrea"),
     ],
 )
-def test_existing_climate_configuration(model: str) -> None:
+def test_existing_climate_configuration(hass: HomeAssistant, model: str) -> None:
     """Existing models expose the same range, step, modes, and features."""
     api = MagicMock(spec=ZentralyApi)
     device = create_device(api, f"{model}0100000001", "aa")
     entity = ZentralyClimate(device)
+    entity.hass = hass
     assert entity.min_temp == 5
     assert entity.max_temp == 30
     assert entity.target_temperature_step == 0.5
@@ -665,12 +668,13 @@ class RestrictedClimateCommands(ZttinCommands):
     )
 
 
-def test_model_configuration_controls_ui_and_commands() -> None:
+def test_model_configuration_controls_ui_and_commands(hass: HomeAssistant) -> None:
     """One declaration changes the UI limits and protocol validation together."""
     device = create_device(MagicMock(spec=ZentralyApi), "ZTTIN0100000001", "aa")
     commands = RestrictedClimateCommands()
     device.commands = commands
     entity = ZentralyClimate(device)
+    entity.hass = hass
     assert entity.min_temp == 10
     assert entity.max_temp == 25
     assert entity.target_temperature_step == 1
@@ -780,3 +784,130 @@ async def test_error_translation(
     assert exc.value.translation_domain == "zentraly"
     assert exc.value.translation_key == key
     assert isinstance(exc.value.__cause__, error)
+
+
+@pytest.mark.usefixtures("setup_integration")
+async def test_fahrenheit_temperature_write(
+    hass: HomeAssistant, mock_climate_api: MagicMock
+) -> None:
+    """Converted Fahrenheit requests use the supported native temperature step."""
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    await hass.services.async_call(
+        "climate",
+        "set_temperature",
+        {ATTR_ENTITY_ID: ENTITY_ID, ATTR_TEMPERATURE: 70.0},
+        blocking=True,
+    )
+    mock_climate_api.async_set_target_temperature.assert_awaited_once_with(21.0)
+    assert hass.states.get(ENTITY_ID).attributes[ATTR_TEMPERATURE] == 70
+
+
+@pytest.mark.parametrize(
+    ("service", "initial", "expected"),
+    [
+        pytest.param(
+            "turn_on", ClimateOperationMode.OFF, ClimateOperationMode.MANUAL, id="on"
+        ),
+        pytest.param(
+            "turn_off", ClimateOperationMode.AUTO, ClimateOperationMode.OFF, id="off"
+        ),
+        pytest.param(
+            "toggle",
+            ClimateOperationMode.OFF,
+            ClimateOperationMode.MANUAL,
+            id="toggle-on",
+        ),
+        pytest.param(
+            "toggle",
+            ClimateOperationMode.AWAY,
+            ClimateOperationMode.OFF,
+            id="toggle-off-away",
+        ),
+    ],
+)
+@pytest.mark.usefixtures("setup_integration")
+async def test_power_actions(
+    hass: HomeAssistant,
+    mock_climate_api: MagicMock,
+    service: str,
+    initial: ClimateOperationMode,
+    expected: ClimateOperationMode,
+) -> None:
+    """Standard power actions use supported modes and clear the Away preset."""
+    mock_climate_api.async_get_operation_mode.return_value = initial
+    mock_climate_api.add_state_listener.call_args.args[0](
+        {ClimateCapability.OPERATION_MODE: initial}
+    )
+    await hass.services.async_call(
+        "climate", service, {ATTR_ENTITY_ID: ENTITY_ID}, blocking=True
+    )
+    mock_climate_api.async_set_operation_mode.assert_awaited_once_with(expected)
+    assert hass.states.get(ENTITY_ID).attributes[ATTR_PRESET_MODE] == PRESET_NONE
+
+
+@pytest.mark.parametrize(
+    ("direction", "native_target", "display_target"),
+    [
+        pytest.param(-1, 20.5, 69, id="decrement"),
+        pytest.param(1, 21.5, 71, id="increment"),
+    ],
+)
+@pytest.mark.usefixtures("setup_integration")
+async def test_fahrenheit_display_step(
+    hass: HomeAssistant,
+    mock_climate_api: MagicMock,
+    direction: int,
+    native_target: float,
+    display_target: int,
+) -> None:
+    """Fahrenheit controls move the target while writing only Celsius half degrees."""
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    await async_update_entity(hass, ENTITY_ID)
+    state = hass.states.get(ENTITY_ID)
+    assert state.attributes[ATTR_TEMPERATURE] == 70
+    assert state.attributes[ATTR_TARGET_TEMP_STEP] == 1.0
+    requested = (
+        state.attributes[ATTR_TEMPERATURE]
+        + direction * state.attributes[ATTR_TARGET_TEMP_STEP]
+    )
+    await hass.services.async_call(
+        "climate",
+        "set_temperature",
+        {ATTR_ENTITY_ID: ENTITY_ID, ATTR_TEMPERATURE: requested},
+        blocking=True,
+    )
+    mock_climate_api.async_set_target_temperature.assert_awaited_once_with(
+        native_target
+    )
+    assert hass.states.get(ENTITY_ID).attributes[ATTR_TEMPERATURE] == display_target
+
+
+async def test_disabled_polling_keeps_reports_and_reconnect(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api: MagicMock,
+    mock_climate_api: MagicMock,
+    mock_device_info: AsyncMock,
+    connection_state: Callable[[bool], None],
+) -> None:
+    """The entry preference suppresses recurring reads without suppressing reports."""
+    hass.config_entries.async_update_entry(mock_config_entry, pref_disable_polling=True)
+    with patch(
+        "homeassistant.components.zentraly.get_device_platforms",
+        return_value=frozenset({Platform.CLIMATE}),
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+    mock_climate_api.async_get_current_temperature.assert_awaited_once()
+    mock_climate_api.async_get_current_temperature.reset_mock()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=5))
+    await hass.async_block_till_done(wait_background_tasks=True)
+    mock_climate_api.async_get_current_temperature.assert_not_awaited()
+    mock_climate_api.add_state_listener.call_args.args[0](
+        {ClimateCapability.LOCAL_TEMPERATURE: 23.0}
+    )
+    assert hass.states.get(ENTITY_ID).attributes[ATTR_CURRENT_TEMPERATURE] == 23.0
+    connection_state(False)
+    connection_state(True)
+    await hass.async_block_till_done()
+    mock_climate_api.async_get_current_temperature.assert_awaited_once()

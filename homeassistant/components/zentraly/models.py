@@ -1,5 +1,6 @@
 """Home Assistant runtime and registry information for Zentraly."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from zentraly import ZentralyApi, ZentralyDevice as LibraryDevice
@@ -61,6 +62,10 @@ class ZentralyData:
     api: ZentralyApi
     device: ZentralyDevice
     children: dict[str, ZentralyDevice] = field(default_factory=dict)
+
+    device_info_refresh: dict[str, Callable[[], Awaitable[None]]] = field(
+        default_factory=dict
+    )
 
     def get_child(
         self,

@@ -7,6 +7,7 @@ from typing import Any, Self, override
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pytest_homeassistant.common import MockConfigEntry
 from zentraly import (
     SwitchCapability,
     ZentralyApi,
@@ -42,8 +43,6 @@ from .helpers import (
     async_check_platform_refresh_lifecycle,
     async_check_report_during_read,
 )
-
-from tests.common import MockConfigEntry
 
 
 @pytest.mark.parametrize(
@@ -434,7 +433,12 @@ async def test_disconnect_setting(
         api = api_class.return_value
         api.supports.side_effect = {SwitchCapability.DISCONNECT_ON_ERROR}.__contains__
         api.async_get_disconnect_on_error.return_value = False
-        api.async_set_disconnect_on_error.return_value = True
+
+        async def write(value: bool) -> bool:
+            api.async_get_disconnect_on_error.return_value = value
+            return True
+
+        api.async_set_disconnect_on_error.side_effect = write
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
         entity_id = f"switch.{device_id.lower()}_disconnect_on_error"

@@ -5,6 +5,7 @@ from datetime import timedelta
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 from zentraly import (
     ClimateOperationMode,
     DeviceModel,
@@ -26,14 +27,13 @@ from homeassistant.const import (
     CONF_MAC,
     CONF_PASSWORD,
     CONF_PORT,
+    EVENT_HOMEASSISTANT_STOP,
     Platform,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryError
+from homeassistant.exceptions import ConfigEntryError, HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
-
-from tests.common import MockConfigEntry, async_fire_time_changed
 
 PARENT_DEVICE_ID = "ZTTIN0100000631"
 CHILD_DEVICE_ID = "ZTBIN0100000021"
@@ -87,7 +87,7 @@ async def test_unload_clears_real_pending_requests(
         assert len(connection._pending_requests) == 20
         assert connection._waiting == 5
         with patch.object(
-            hass.config_entries, "async_unload_platforms", return_value=True
+            hass.config_entries, "async_unload_platforms_or_raise", return_value=None
         ):
             assert await hass.config_entries.async_unload(entry.entry_id)
         assert await asyncio.gather(*tasks) == [(rid, None) for rid in range(1, 26)]
@@ -273,22 +273,25 @@ async def test_refresh_device_info(
         await _async_refresh_device_info(device, device_registry, registered.id)
         assert device_registry.async_get(registered.id).sw_version == "1.0"
         assert device_registry.async_get(registered.id).hw_version == "2.0"
-        await _async_refresh_device_info(device, device_registry, registered.id)
+        with pytest.raises(HomeAssistantError, match="firmware_read_failed"):
+            await _async_refresh_device_info(device, device_registry, registered.id)
         assert device_registry.async_get(registered.id).sw_version == "1.0"
         assert device_registry.async_get(registered.id).hw_version == "2.1"
         with patch.object(device_registry, "async_update_device") as update:
-            await _async_refresh_device_info(device, device_registry, registered.id)
+            with pytest.raises(HomeAssistantError, match="versions_read_failed"):
+                await _async_refresh_device_info(device, device_registry, registered.id)
             api.connected = False
-            await _async_refresh_device_info(device, device_registry, registered.id)
+            with pytest.raises(HomeAssistantError, match="cannot_connect"):
+                await _async_refresh_device_info(device, device_registry, registered.id)
         update.assert_not_called()
         assert read_info.await_count == 3
 
 
 @pytest.mark.parametrize("periodic_polling", [True, False])
-async def test_device_info_periodic_refresh(
+async def test_device_info_has_no_periodic_refresh(
     hass: HomeAssistant, device_registry: dr.DeviceRegistry, periodic_polling: bool
 ) -> None:
-    """Run the scheduled public version read and cancel it when unloading."""
+    """Read versions initially, with no scheduled metadata refresh."""
     entry = _parent_entry()
     entry.add_to_hass(hass)
     api = MagicMock(spec=ZentralyApi)
@@ -317,11 +320,11 @@ async def test_device_info_periodic_refresh(
         read_info.reset_mock()
         now = dt_util.utcnow()
         async_fire_time_changed(hass, now + timedelta(minutes=5))
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)
         read_info.assert_not_awaited()
         async_fire_time_changed(hass, now + timedelta(hours=24))
-        await hass.async_block_till_done()
-        assert read_info.await_count == int(periodic_polling)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        read_info.assert_not_awaited()
         registered = device_registry.async_get_device_by_identifier(
             (DOMAIN, PARENT_DEVICE_ID), entry.entry_id
         )
@@ -329,8 +332,8 @@ async def test_device_info_periodic_refresh(
         assert registered.hw_version == "2.0"
         assert await hass.config_entries.async_unload(entry.entry_id)
         async_fire_time_changed(hass, now + timedelta(hours=48))
-        await hass.async_block_till_done()
-        assert read_info.await_count == int(periodic_polling)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        read_info.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -370,7 +373,10 @@ async def test_partial_device_info_after_restart(
     )
     assert device.firmware_version is None
     assert device.hardware_version is None
-    with patch.object(type(device), "async_get_device_info", side_effect=[info]):
+    with (
+        patch.object(type(device), "async_get_device_info", side_effect=[info]),
+        pytest.raises((HomeAssistantError, ZentralyConnectionError)),
+    ):
         await _async_refresh_device_info(device, device_registry, registered.id)
     updated = device_registry.async_get(registered.id)
     assert updated.sw_version == firmware
@@ -434,16 +440,16 @@ async def test_climate_periodic_refresh_lifecycle(
         climate_api.async_get_current_temperature.reset_mock()
         now = dt_util.utcnow()
         async_fire_time_changed(hass, now + timedelta(minutes=4))
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)
         climate_api.async_get_current_temperature.assert_not_awaited()
         async_fire_time_changed(hass, now + timedelta(minutes=5))
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)
         assert climate_api.async_get_current_temperature.await_count == int(
             periodic_polling
         )
         assert await hass.config_entries.async_unload(entry.entry_id)
         async_fire_time_changed(hass, now + timedelta(minutes=10))
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)
         assert climate_api.async_get_current_temperature.await_count == int(
             periodic_polling
         )
@@ -518,3 +524,25 @@ async def test_device_info_connection_and_unload(hass: HomeAssistant) -> None:
         assert await hass.config_entries.async_unload(entry.entry_id)
         assert cancelled.is_set()
         api.add_connection_state_listener.return_value.assert_called_once_with()
+
+
+@pytest.mark.usefixtures("setup_integration")
+async def test_shutdown_disconnects(hass: HomeAssistant, mock_api: MagicMock) -> None:
+    """Home Assistant shutdown awaits the library connection cleanup."""
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    mock_api.async_disconnect.assert_awaited_once_with()
+
+
+@pytest.mark.usefixtures("setup_integration")
+async def test_unload_removes_shutdown_listener(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api: MagicMock,
+) -> None:
+    """An unloaded entry does not disconnect again when Home Assistant stops."""
+    assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
+    mock_api.async_disconnect.assert_awaited_once_with()
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    mock_api.async_disconnect.assert_awaited_once_with()

@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pytest_homeassistant.common import MockConfigEntry
 from zentraly import DeviceModel
 
 from homeassistant.components.zentraly.const import DOMAIN
@@ -23,8 +24,6 @@ from .test_init import (
     _parent_entry,
     _zteim_entry,
 )
-
-from tests.common import MockConfigEntry
 
 
 @pytest.mark.usefixtures("mock_device_info")
@@ -54,8 +53,11 @@ async def test_gateway_with_only_configuration_entities(
         entity_registry, mock_config_entry.entry_id
     )
     assert {entry.domain for entry in entries} == {"button", "switch"}
-    assert len(entries) == 2
-    assert all(entry.entity_category is EntityCategory.CONFIG for entry in entries)
+    assert len(entries) == 3
+    assert {entry.entity_category for entry in entries} == {
+        EntityCategory.CONFIG,
+        EntityCategory.DIAGNOSTIC,
+    }
     assert hass.states.get(f"switch.{device_id.lower()}_always_on_led").state == "on"
 
 
@@ -545,7 +547,9 @@ async def test_remove_gateway_removes_children(
         )
         for subentry_id, child in entry.runtime_data.children.items()
     ]
-    with patch.object(hass.config_entries, "async_unload_platforms", return_value=True):
+    with patch.object(
+        hass.config_entries, "async_unload_platforms_or_raise", return_value=None
+    ):
         result = await hass.config_entries.async_remove(entry.entry_id)
     await hass.async_block_till_done()
     assert result == {"require_restart": False}

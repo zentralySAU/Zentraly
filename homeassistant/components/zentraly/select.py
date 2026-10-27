@@ -1,6 +1,5 @@
 """Select platform for Zentraly."""
 
-from datetime import datetime
 from typing import Any, assert_never, override
 
 from zentraly import (
@@ -16,11 +15,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.event import async_track_time_interval
 
 from .actions import translate_action_errors
-from .const import DOMAIN, SCAN_INTERVAL
+from .const import DOMAIN, SCAN_INTERVAL as DEFAULT_SCAN_INTERVAL
 from .models import ZentralyConfigEntry, ZentralyDevice
+
+SCAN_INTERVAL = DEFAULT_SCAN_INTERVAL
 
 PARALLEL_UPDATES = 1
 
@@ -81,7 +81,6 @@ class ZentralySelect(SelectEntity):
     """Representation of a Zentraly select."""
 
     _attr_has_entity_name = True
-    _attr_should_poll = False
 
     def __init__(
         self,
@@ -129,24 +128,13 @@ class ZentralySelect(SelectEntity):
             self._select_api.add_state_listener(self._handle_state_update)
         )
 
-        if self._device.supports_periodic_polling:
-            self.async_on_remove(
-                async_track_time_interval(
-                    self.hass,
-                    self._async_periodic_refresh,
-                    SCAN_INTERVAL,
-                )
-            )
-
         self.async_schedule_update_ha_state(force_refresh=True)
 
-    async def _async_periodic_refresh(
-        self,
-        now: datetime,
-    ) -> None:
-        """Refresh select state periodically."""
-
-        self.async_schedule_update_ha_state(force_refresh=True)
+    @property
+    @override
+    def should_poll(self) -> bool:
+        """Use Home Assistant polling only when the device permits it."""
+        return self._device.supports_periodic_polling
 
     @property
     @override
