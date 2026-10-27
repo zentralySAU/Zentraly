@@ -3,11 +3,27 @@
 import asyncio
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from datetime import timedelta
-from unittest.mock import MagicMock, call
+import logging
+from typing import Any
+from unittest.mock import MagicMock, call, patch
 
 import pytest
-from zentraly import ClimateCapability, ClimateOperationMode, ZentralyConnectionError
+from zentraly import (
+    ClimateCapability,
+    ClimateConfiguration,
+    ClimateOperationMode,
+    ZentralyApi,
+    ZentralyApiError,
+    ZentralyClimateApi,
+    ZentralyCommandRejectedError,
+    ZentralyConnectionBusyError,
+    ZentralyConnectionError,
+    ZentralyInvalidResponseError,
+    ZentralyValidationError,
+)
+from zentraly.devices.zttin import ZttinCommands
 
 from homeassistant.components.climate import (
     ATTR_CURRENT_HUMIDITY,
@@ -17,9 +33,13 @@ from homeassistant.components.climate import (
     ATTR_PRESET_MODE,
     PRESET_AWAY,
     PRESET_NONE,
+    ClimateEntityFeature,
     HVACAction,
     HVACMode,
 )
+from homeassistant.components.zentraly import create_device
+from homeassistant.components.zentraly.climate import ZentralyClimate
+from homeassistant.components.zentraly.models import ZentralyDevice
 from homeassistant.const import (
     ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
@@ -28,15 +48,21 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.util import dt as dt_util
 
 from .conftest import ENTITY_ID
+from .helpers import (
+    Action,
+    async_check_capability_action_errors,
+    async_check_platform_device_availability,
+)
 
 from tests.common import MockConfigEntry, async_fire_time_changed
 
-pytestmark = pytest.mark.usefixtures("setup_integration")
 
-
+@pytest.mark.usefixtures("setup_integration")
 @pytest.mark.parametrize(
     ("mode", "operation"),
     [
@@ -62,6 +88,7 @@ async def test_hvac_mode(
     mock_climate_api.async_set_operation_mode.assert_awaited_once_with(operation)
 
 
+@pytest.mark.usefixtures("setup_integration")
 @pytest.mark.parametrize(
     ("success", "expected", "expectation"),
     [
@@ -89,6 +116,7 @@ async def test_temperature_write(
     mock_climate_api.async_set_target_temperature.assert_awaited_once_with(22.0)
 
 
+@pytest.mark.usefixtures("setup_integration")
 async def test_away_report(hass: HomeAssistant, mock_climate_api: MagicMock) -> None:
     """Library reports update the registered entity's Away target and heat demand."""
     mock_climate_api.add_state_listener.call_args.args[0](
@@ -108,6 +136,7 @@ async def test_away_report(hass: HomeAssistant, mock_climate_api: MagicMock) -> 
     assert state.attributes[ATTR_HVAC_ACTION] == HVACAction.HEATING
 
 
+@pytest.mark.usefixtures("setup_integration")
 async def test_missing_readings_clear_previous_values(
     hass: HomeAssistant, mock_climate_api: MagicMock
 ) -> None:
@@ -127,6 +156,7 @@ async def test_missing_readings_clear_previous_values(
     assert ATTR_HVAC_ACTION not in state.attributes
 
 
+@pytest.mark.usefixtures("setup_integration")
 @pytest.mark.parametrize(
     ("mode", "operation"),
     [
@@ -157,6 +187,7 @@ async def test_temperature_with_explicit_mode(
     assert writes.mock_calls == [call.temperature(22.0), call.mode(operation)]
 
 
+@pytest.mark.usefixtures("setup_integration")
 @pytest.mark.parametrize(
     ("initial", "requested", "operation", "success", "expected", "expectation"),
     [
@@ -224,6 +255,7 @@ async def test_preset_write(
     mock_climate_api.async_set_operation_mode.assert_awaited_once_with(operation)
 
 
+@pytest.mark.usefixtures("setup_integration")
 async def test_failed_hvac_mode(
     hass: HomeAssistant, mock_climate_api: MagicMock
 ) -> None:
@@ -241,6 +273,7 @@ async def test_failed_hvac_mode(
     assert hass.states.get(ENTITY_ID).state == HVACMode.HEAT
 
 
+@pytest.mark.usefixtures("setup_integration")
 async def test_periodic_refresh_during_reconnect(
     hass: HomeAssistant,
     mock_climate_api: MagicMock,
@@ -276,6 +309,7 @@ async def test_periodic_refresh_during_reconnect(
     assert hass.states.get(ENTITY_ID).attributes[ATTR_CURRENT_TEMPERATURE] == 20.0
 
 
+@pytest.mark.usefixtures("setup_integration")
 @pytest.mark.parametrize(
     "error",
     [
@@ -323,6 +357,7 @@ async def test_failed_refresh_cleans_up_reads(
     assert hass.states.get(ENTITY_ID).attributes[ATTR_TEMPERATURE] == 21.0
 
 
+@pytest.mark.usefixtures("setup_integration")
 async def test_unload(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
@@ -342,6 +377,7 @@ async def test_unload(
     assert hass.states.get(ENTITY_ID).state == STATE_UNAVAILABLE
 
 
+@pytest.mark.usefixtures("setup_integration")
 async def test_action_waits_for_refresh(
     hass: HomeAssistant,
     mock_climate_api: MagicMock,
@@ -380,6 +416,7 @@ async def test_action_waits_for_refresh(
     assert hass.states.get(ENTITY_ID).attributes[ATTR_TEMPERATURE] == 22.0
 
 
+@pytest.mark.usefixtures("setup_integration")
 async def test_temperature_with_unsupported_mode(
     hass: HomeAssistant,
     mock_climate_api: MagicMock,
@@ -403,6 +440,7 @@ async def test_temperature_with_unsupported_mode(
     assert hass.states.get(ENTITY_ID) == before
 
 
+@pytest.mark.usefixtures("setup_integration")
 @pytest.mark.parametrize(
     ("operation_mode", "target", "hvac_mode"),
     [
@@ -461,6 +499,7 @@ async def test_report_during_refresh(
     assert state.attributes[ATTR_TEMPERATURE] == 21.0
 
 
+@pytest.mark.usefixtures("setup_integration")
 async def test_separate_away_temperature(
     hass: HomeAssistant,
     mock_climate_api: MagicMock,
@@ -482,3 +521,262 @@ async def test_separate_away_temperature(
         blocking=True,
     )
     assert hass.states.get(ENTITY_ID).attributes[ATTR_TEMPERATURE] == 21.0
+
+
+@pytest.mark.parametrize(
+    ("domain", "model", "factory"),
+    [
+        pytest.param(
+            "climate", "ZTTIN", lambda device: [ZentralyClimate(device)], id="climate"
+        )
+    ],
+)
+async def test_platform_device_availability(
+    hass: HomeAssistant,
+    domain: str,
+    model: str,
+    factory: Callable[[ZentralyDevice], list[Entity]],
+) -> None:
+    """Every platform publishes a child outage and recovery without gateway loss."""
+    await async_check_platform_device_availability(hass, domain, model, factory)
+
+
+@pytest.mark.parametrize(
+    ("device_id", "action"),
+    [
+        pytest.param(
+            "ZTTIN0100000001",
+            lambda d: ZentralyClimateApi(d).async_set_target_temperature(22),
+            id="climate",
+        )
+    ],
+)
+@pytest.mark.parametrize(
+    ("response", "error"),
+    [
+        pytest.param(None, ZentralyConnectionError, id="transport-error"),
+        pytest.param(
+            (1, {"status": 200, "cmd": "unexpected", "rid": 1}),
+            ZentralyInvalidResponseError,
+            id="platform-parser-error",
+        ),
+    ],
+)
+async def test_capability_action_errors(
+    device_id: str,
+    action: Action,
+    response: tuple[int, dict[str, Any]] | None,
+    error: type[ZentralyApiError],
+) -> None:
+    """Preserve the failure category through each capability API."""
+    await async_check_capability_action_errors(device_id, action, response, error)
+
+
+@pytest.mark.parametrize("model", ["ZTTWZ", "ZTTIN"])
+async def test_climate_away_report(hass: HomeAssistant, model: str) -> None:
+    """Climate uses the reported target in away and ignores its configuration value."""
+    api = ZentralyApi("192.168.1.42", 80, "password", f"{model}0100000001")
+    api._set_connected(True)
+    device = create_device(api, api.device_id, "aa")
+    entity = ZentralyClimate(device)
+    entity.entity_id = "climate.zentraly_report"
+    component = EntityComponent(logging.getLogger(__name__), "climate", hass)
+    with patch.object(api, "async_execute_command") as execute:
+        with patch(
+            "homeassistant.helpers.entity.Entity.async_schedule_update_ha_state"
+        ):
+            await component.async_add_entities([entity])
+        api._handle_report(
+            {
+                "cmd": "report",
+                "data": [
+                    {"mac": "aa", "ep": 1, "cluster": 65513, "id": 28, "val": 3},
+                    {"mac": "aa", "ep": 1, "cluster": 65513, "id": 18, "val": 1800},
+                    {"mac": "aa", "ep": 1, "cluster": 65513, "id": 17, "val": 2500},
+                ],
+            }
+        )
+        assert entity.target_temperature == 18.0
+        assert entity.preset_mode == "away"
+        api._handle_report(
+            {
+                "cmd": "report",
+                "data": [
+                    {"mac": "aa", "ep": 1, "cluster": 65513, "id": 0, "val": 2100},
+                ],
+            }
+        )
+        assert entity.current_temperature == 21.0
+        assert entity.target_temperature == 18.0
+        execute.assert_not_awaited()
+        execute.return_value = None
+        with patch.object(entity._climate_api, "async_get_away_temperature") as away:
+            await entity.async_update()
+            away.assert_not_awaited()
+        await entity.async_remove()
+    assert api._report_listeners == {}
+
+
+async def test_model_validation() -> None:
+    """A rejected model value is translated before any network write."""
+    api = ZentralyApi("192.168.1.42", 80, "password", "ZTTIN0100000001")
+    api._connected = True
+    device = create_device(api, api.device_id, "aabbccddeeff")
+    with patch.object(api._connection, "async_send_command") as send:
+
+        async def build_only(builder: Callable[[int], dict[str, Any]]) -> None:
+            builder(1)
+
+        send.side_effect = build_only
+        with pytest.raises(ZentralyValidationError):
+            await ZentralyClimateApi(device).async_set_target_temperature(100)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param("ZTTIN", id="zttin"),
+        pytest.param("ZTTWZ", id="zttwz"),
+        pytest.param("ZTREA", id="ztrea"),
+    ],
+)
+def test_existing_climate_configuration(model: str) -> None:
+    """Existing models expose the same range, step, modes, and features."""
+    api = MagicMock(spec=ZentralyApi)
+    device = create_device(api, f"{model}0100000001", "aa")
+    entity = ZentralyClimate(device)
+    assert entity.min_temp == 5
+    assert entity.max_temp == 30
+    assert entity.target_temperature_step == 0.5
+    assert entity.hvac_modes == [HVACMode.OFF, HVACMode.HEAT, HVACMode.AUTO]
+    assert entity.preset_modes == [PRESET_NONE, PRESET_AWAY]
+    assert entity.supported_features & ClimateEntityFeature.TARGET_TEMPERATURE
+    assert entity.supported_features & ClimateEntityFeature.PRESET_MODE
+
+
+class RestrictedClimateCommands(ZttinCommands):
+    """Test model configured without changes to the API or entity."""
+
+    climate_configuration = ClimateConfiguration(
+        minimum_temperature=10,
+        maximum_temperature=25,
+        temperature_step=1,
+        operation_modes=(ClimateOperationMode.OFF, ClimateOperationMode.MANUAL),
+    )
+
+
+def test_model_configuration_controls_ui_and_commands() -> None:
+    """One declaration changes the UI limits and protocol validation together."""
+    device = create_device(MagicMock(spec=ZentralyApi), "ZTTIN0100000001", "aa")
+    commands = RestrictedClimateCommands()
+    device.commands = commands
+    entity = ZentralyClimate(device)
+    assert entity.min_temp == 10
+    assert entity.max_temp == 25
+    assert entity.target_temperature_step == 1
+    assert entity.hvac_modes == [HVACMode.OFF, HVACMode.HEAT]
+    assert entity.preset_modes is None
+    assert not entity.supported_features & ClimateEntityFeature.PRESET_MODE
+    assert (
+        commands.build_write_target_temperature(1, "aa", 16)["attrs"][0]["val"] == 1600
+    )
+    with pytest.raises(ValueError):
+        commands.build_write_target_temperature(1, "aa", 5)
+    with pytest.raises(ValueError):
+        commands.build_write_target_temperature(1, "aa", 20.5)
+    with pytest.raises(ValueError):
+        commands.build_write_operation_mode(1, "aa", ClimateOperationMode.AUTO)
+    with pytest.raises(ValueError):
+        commands.build_write_operation_mode(1, "aa", ClimateOperationMode.AWAY)
+
+
+@pytest.mark.parametrize(
+    ("mode_after", "expected"),
+    [
+        pytest.param(None, HVACMode.AUTO, id="preserve-mode"),
+        pytest.param(
+            ClimateOperationMode.MANUAL, HVACMode.HEAT, id="manual-after-write"
+        ),
+    ],
+)
+async def test_mode_after_setpoint(
+    mode_after: ClimateOperationMode | None, expected: HVACMode
+) -> None:
+    """Only models declaring a mode transition update the displayed mode."""
+    device = create_device(MagicMock(spec=ZentralyApi), "ZTTIN0100000001", "aa")
+    with patch.object(
+        device.commands,
+        "climate_configuration",
+        replace(ZttinCommands.climate_configuration, mode_after_setpoint=mode_after),
+    ):
+        entity = ZentralyClimate(device)
+        entity._apply_operation_mode(ClimateOperationMode.AUTO)
+        with (
+            patch.object(
+                entity._climate_api, "async_set_target_temperature", return_value=True
+            ),
+            patch.object(entity, "async_write_ha_state"),
+        ):
+            await entity.async_set_temperature(temperature=22)
+    assert entity.hvac_mode is expected
+
+
+@pytest.mark.usefixtures("setup_integration")
+@pytest.mark.parametrize(
+    ("error", "ha_error", "key"),
+    [
+        pytest.param(ZentralyApiError, HomeAssistantError, "action_failed", id="api"),
+        pytest.param(
+            ZentralyConnectionBusyError,
+            HomeAssistantError,
+            "connection_busy",
+            id="saturation",
+        ),
+        pytest.param(
+            ZentralyConnectionError,
+            HomeAssistantError,
+            "cannot_connect",
+            id="connection",
+        ),
+        pytest.param(
+            ZentralyInvalidResponseError,
+            HomeAssistantError,
+            "invalid_response",
+            id="response",
+        ),
+        pytest.param(
+            ZentralyCommandRejectedError,
+            HomeAssistantError,
+            "command_rejected",
+            id="rejected",
+        ),
+        pytest.param(
+            ZentralyValidationError,
+            ServiceValidationError,
+            "invalid_action",
+            id="validation",
+        ),
+    ],
+)
+async def test_error_translation(
+    hass: HomeAssistant,
+    mock_climate_api: MagicMock,
+    error: type[ZentralyApiError],
+    ha_error: type[HomeAssistantError],
+    key: str,
+) -> None:
+    """Expose translation metadata instead of model-specific technical text."""
+
+    mock_climate_api.async_set_target_temperature.side_effect = error(
+        "Technical protocol detail"
+    )
+    with pytest.raises(ha_error) as exc:
+        await hass.services.async_call(
+            "climate",
+            "set_temperature",
+            {ATTR_ENTITY_ID: ENTITY_ID, ATTR_TEMPERATURE: 22},
+            blocking=True,
+        )
+    assert exc.value.translation_domain == "zentraly"
+    assert exc.value.translation_key == key
+    assert isinstance(exc.value.__cause__, error)

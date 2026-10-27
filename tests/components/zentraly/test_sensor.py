@@ -10,6 +10,7 @@ import pytest
 from zentraly import (
     SensorCapability,
     ZentralyApi,
+    ZentralyBinarySensorApi,
     ZentralyOutputType,
     ZentralySensorApi,
 )
@@ -22,11 +23,29 @@ from homeassistant.components.zentraly.sensor import (
     _create_sensor_entities,
 )
 from homeassistant.config_entries import ConfigSubentry
-from homeassistant.const import CONF_DEVICE_ID, CONF_MAC, Platform, UnitOfVolumeFlowRate
+from homeassistant.const import (
+    CONF_DEVICE_ID,
+    CONF_MAC,
+    EntityCategory,
+    Platform,
+    UnitOfVolumeFlowRate,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.util import dt as dt_util
+
+from .helpers import (
+    StateCase,
+    async_check_opentherm_loss_during_read,
+    async_check_output_change_published_immediately,
+    async_check_partial_report_updates_entity,
+    async_check_periodic_read_policy,
+    async_check_platform_device_availability,
+    async_check_platform_refresh_lifecycle,
+    async_check_report_during_read,
+)
 
 from tests.common import MockConfigEntry, async_fire_time_changed
 
@@ -335,3 +354,258 @@ async def test_wifi_reads_follow_topology(
             "sensor", DOMAIN, f"{device_id}_wifi_signal_power"
         )
     ) == bool(wifi_reads)
+
+
+@pytest.mark.parametrize(
+    ("domain", "factory", "capability", "api_class", "getter", "value"),
+    [
+        pytest.param(
+            "sensor",
+            _create_sensor_entities,
+            "feed_temperature",
+            ZentralySensorApi,
+            "async_get_feed_temperature",
+            40.0,
+            id="sensor",
+        )
+    ],
+)
+async def test_opentherm_loss_during_read(
+    hass: HomeAssistant,
+    domain: str,
+    factory: Callable[[ZentralyDevice], list[Entity]],
+    capability: str,
+    api_class: type[ZentralySensorApi | ZentralyBinarySensorApi],
+    getter: str,
+    value: float | bool,
+) -> None:
+    """A response cannot restore values invalidated by loss of OpenTherm."""
+    await async_check_opentherm_loss_during_read(
+        hass, domain, factory, capability, api_class, getter, value
+    )
+
+
+@pytest.mark.parametrize(
+    ("domain", "model", "factory"),
+    [pytest.param("sensor", "ZTBIN", _create_sensor_entities, id="sensor")],
+)
+async def test_platform_device_availability(
+    hass: HomeAssistant,
+    domain: str,
+    model: str,
+    factory: Callable[[ZentralyDevice], list[Entity]],
+) -> None:
+    """Every platform publishes a child outage and recovery without gateway loss."""
+    await async_check_platform_device_availability(hass, domain, model, factory)
+
+
+@pytest.mark.parametrize(
+    ("domain", "factory", "capability", "attribute", "expected"),
+    [
+        pytest.param(
+            "sensor",
+            _create_sensor_entities,
+            "error_id",
+            "native_value",
+            None,
+            id="sensor-unknown",
+        ),
+        pytest.param(
+            "sensor",
+            _create_sensor_entities,
+            "output_type",
+            "native_value",
+            "on_off",
+            id="output-sensor",
+        ),
+    ],
+)
+async def test_output_change_published_immediately(
+    hass: HomeAssistant,
+    domain: str,
+    factory: Callable[[ZentralyDevice], list[Entity]],
+    capability: str,
+    attribute: str,
+    expected: bool | str | None,
+) -> None:
+    """Existing entities react to an output-only report without polling."""
+    await async_check_output_change_published_immediately(
+        hass, domain, factory, capability, attribute, expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("domain", "model", "factory"),
+    [pytest.param("sensor", "ZTBIN", _create_sensor_entities, id="sensor")],
+)
+async def test_platform_refresh_lifecycle(
+    hass: HomeAssistant,
+    domain: str,
+    model: str,
+    factory: Callable[[ZentralyDevice], list[Entity]],
+) -> None:
+    """Recover after an initial failure, serialize refreshes and stop on unload."""
+    await async_check_platform_refresh_lifecycle(hass, domain, model, factory)
+
+
+@pytest.mark.parametrize(
+    (
+        "domain",
+        "model",
+        "factory",
+        "capability",
+        "cluster",
+        "attribute_id",
+        "raw",
+        "property_name",
+        "expected",
+    ),
+    [
+        pytest.param(
+            "sensor",
+            "ZTTWZ",
+            _create_sensor_entities,
+            "ch_setpoint",
+            65535,
+            1,
+            2050,
+            "native_value",
+            20.5,
+            id="measurement",
+        )
+    ],
+)
+async def test_partial_report_updates_entity(
+    hass: HomeAssistant,
+    domain: str,
+    model: str,
+    factory: Callable[[ZentralyDevice], list[Entity]],
+    capability: str,
+    cluster: int,
+    attribute_id: int,
+    raw: int,
+    property_name: str,
+    expected: bool | float | str,
+) -> None:
+    """Valid fields survive malformed neighbors; unrelated reports preserve state."""
+    await async_check_partial_report_updates_entity(
+        hass,
+        domain,
+        model,
+        factory,
+        capability,
+        cluster,
+        attribute_id,
+        raw,
+        property_name,
+        expected,
+    )
+
+
+@pytest.mark.parametrize(
+    "state_case",
+    [
+        pytest.param(
+            StateCase(
+                Platform.SENSOR,
+                "ZentralySensorApi",
+                "ZTEIM",
+                SensorCapability.VOLTAGE,
+                "async_get_voltage",
+                220.0,
+                230.0,
+                "220.0",
+                "230.0",
+            ),
+            id="sensor",
+        )
+    ],
+)
+async def test_report_during_read(
+    hass: HomeAssistant,
+    state_case: StateCase,
+    state_entity: tuple[str, MagicMock],
+    connection_state: Callable[[bool], None],
+) -> None:
+    """An old response cannot replace a report; later reads still work."""
+    await async_check_report_during_read(
+        hass, state_case, state_entity, connection_state
+    )
+
+
+@pytest.mark.parametrize(
+    "state_case",
+    [
+        pytest.param(
+            StateCase(
+                Platform.SENSOR,
+                "ZentralySensorApi",
+                "ZTEIM",
+                SensorCapability.VOLTAGE,
+                "async_get_voltage",
+                220.0,
+                230.0,
+                "220.0",
+                "230.0",
+            ),
+            id="sensor",
+        )
+    ],
+)
+@pytest.mark.parametrize("periodic_polling", [True, False])
+async def test_periodic_read_policy(
+    hass: HomeAssistant,
+    state_case: StateCase,
+    state_entity: tuple[str, MagicMock],
+    periodic_polling: bool,
+    connection_state: Callable[[bool], None],
+) -> None:
+    """Suppress only recurring reads; initial, report and reconnect paths work."""
+    await async_check_periodic_read_policy(
+        hass, state_case, state_entity, periodic_polling, connection_state
+    )
+
+
+@pytest.mark.usefixtures("mock_device_info")
+async def test_battery_sensor(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_api: MagicMock,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    """Battery is a diagnostic percent sensor and receives direct reports."""
+    device_id = "ZTTZB0100000001"
+    hass.config_entries.async_update_entry(
+        mock_config_entry, data={**mock_config_entry.data, CONF_DEVICE_ID: device_id}
+    )
+    mock_api.device_id = device_id
+    with (
+        patch(
+            "homeassistant.components.zentraly.get_device_platforms",
+            return_value=frozenset({Platform.SENSOR}),
+        ),
+        patch(
+            "homeassistant.components.zentraly.sensor.ZentralySensorApi", autospec=True
+        ) as api_class,
+    ):
+        api = api_class.return_value
+        api.supports.side_effect = {SensorCapability.BATTERY_LEVEL}.__contains__
+        api.async_get_battery_level.return_value = 75
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+        entries = er.async_entries_for_config_entry(
+            entity_registry, mock_config_entry.entry_id
+        )
+        assert len(entries) == 1
+        entity = entries[0]
+        assert entity.entity_category is EntityCategory.DIAGNOSTIC
+        state = hass.states.get(entity.entity_id)
+        assert state.state == "75"
+        assert state.attributes["device_class"] == "battery"
+        assert state.attributes["unit_of_measurement"] == "%"
+        api.async_get_battery_level.assert_awaited_once()
+        async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=5))
+        await hass.async_block_till_done()
+        api.async_get_battery_level.assert_awaited_once()
+        api.add_state_listener.call_args.args[0]({SensorCapability.BATTERY_LEVEL: 0})
+        assert hass.states.get(entity.entity_id).state == "0"
