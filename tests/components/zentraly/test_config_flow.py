@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pytest_homeassistant.common import MockConfigEntry
 from zentraly import ZentralyAuthenticationError, ZentralyConnectionError
 
 from homeassistant import config_entries
@@ -27,8 +28,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import area_registry as ar, device_registry as dr
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
-
-from tests.common import MockConfigEntry
 
 pytestmark = pytest.mark.usefixtures("mock_setup_entry")
 
@@ -65,11 +64,7 @@ async def test_reauth_recovery(
     entry.add_to_hass(hass)
     original = dict(entry.data)
     children = dict(entry.subentries)
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
-        data=entry.data,
-    )
+    result = await entry.start_reauth_flow(hass)
     assert result["step_id"] == "auth"
     with patch(
         "homeassistant.components.zentraly.config_flow.ZentralyApi.async_validate_password",
@@ -99,11 +94,7 @@ async def test_reauth_wrong_device(hass: HomeAssistant) -> None:
     entry = _parent_entry()
     entry.add_to_hass(hass)
     original = dict(entry.data)
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
-        data=entry.data,
-    )
+    result = await entry.start_reauth_flow(hass)
     with patch(
         "homeassistant.components.zentraly.config_flow.ZentralyApi.async_validate_password",
         return_value="001122334455",
@@ -127,11 +118,7 @@ async def test_reauth_with_reload_listener(hass: HomeAssistant, password: str) -
     entry = _parent_entry()
     entry.add_to_hass(hass)
     entry.add_update_listener(_async_reload_entry)
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
-        data=entry.data,
-    )
+    result = await entry.start_reauth_flow(hass)
     with (
         patch(
             "homeassistant.components.zentraly.config_flow.ZentralyApi.async_validate_password",
@@ -247,6 +234,7 @@ async def test_zeroconf_auth_success(
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == device_id
+    assert result["result"].unique_id == device_id
 
     assert result["data"] == {
         CONF_HOST: HOST,
@@ -618,6 +606,8 @@ async def test_child_device_invalid_mac(
 
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "user"
+    # child_added completes setup outside the checker's *_successful convention.
+    # pylint: disable-next=home-assistant-tests-config-flow-error-recovery
     assert result["errors"] == {"base": "invalid_mac"}
 
     mock_validate.assert_not_awaited()
@@ -632,6 +622,12 @@ async def test_child_device_invalid_mac(
         CONF_DEVICE_ID: CHILD_DEVICE_ID,
         CONF_MAC: CHILD_MAC,
     }
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "child_added"
 
 
 @pytest.mark.parametrize(
@@ -675,6 +671,8 @@ async def test_child_device_validation_error_recovery(
     )
 
     assert result["type"] is FlowResultType.FORM
+    # child_added completes setup outside the checker's *_successful convention.
+    # pylint: disable-next=home-assistant-tests-config-flow-error-recovery
     assert result["errors"] == {"base": error}
 
     result = await hass.config_entries.subentries.async_configure(
@@ -687,6 +685,12 @@ async def test_child_device_validation_error_recovery(
         CONF_DEVICE_ID: CHILD_DEVICE_ID,
         CONF_MAC: CHILD_MAC,
     }
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "child_added"
 
 
 async def test_child_device_unknown_model(
@@ -720,6 +724,8 @@ async def test_child_device_unknown_model(
     )
 
     assert result["type"] is FlowResultType.FORM
+    # child_added completes setup outside the checker's *_successful convention.
+    # pylint: disable-next=home-assistant-tests-config-flow-error-recovery
     assert result["errors"] == {"base": "unsupported_device"}
 
     mock_validate.assert_not_awaited()
@@ -734,6 +740,12 @@ async def test_child_device_unknown_model(
         CONF_DEVICE_ID: CHILD_DEVICE_ID,
         CONF_MAC: CHILD_MAC,
     }
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "child_added"
 
 
 async def test_zteim_cannot_be_added_as_child(
@@ -767,6 +779,8 @@ async def test_zteim_cannot_be_added_as_child(
     )
 
     assert result["type"] is FlowResultType.FORM
+    # child_added completes setup outside the checker's *_successful convention.
+    # pylint: disable-next=home-assistant-tests-config-flow-error-recovery
     assert result["errors"] == {"base": "unsupported_child"}
 
     mock_validate.assert_not_awaited()
@@ -781,6 +795,12 @@ async def test_zteim_cannot_be_added_as_child(
         CONF_DEVICE_ID: CHILD_DEVICE_ID,
         CONF_MAC: CHILD_MAC,
     }
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "child_added"
 
 
 @pytest.mark.parametrize(
@@ -830,7 +850,20 @@ async def test_child_device_already_configured_as_entry(
     )
 
     assert result["type"] is FlowResultType.FORM
+    # child_added completes setup outside the checker's *_successful convention.
+    # pylint: disable-next=home-assistant-tests-config-flow-error-recovery
     assert result["errors"] == {"base": "already_configured"}
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        user_input={CONF_DEVICE_ID: "ZTBIN0100000022", CONF_MAC: "aabbccddeeff"},
+    )
+    assert result["step_id"] == "child_details"
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "child_added"
 
 
 async def test_child_flow_requires_loaded_parent(
@@ -999,6 +1032,8 @@ async def test_child_already_configured_as_subentry(
         result["flow_id"],
         user_input={CONF_DEVICE_ID: CHILD_DEVICE_ID, CONF_MAC: CHILD_MAC},
     )
+    # child_added completes setup outside the checker's *_successful convention.
+    # pylint: disable-next=home-assistant-tests-config-flow-error-recovery
     assert result["errors"] == {"base": "already_configured"}
     validate.assert_not_awaited()
     result = await hass.config_entries.subentries.async_configure(
@@ -1012,6 +1047,12 @@ async def test_child_already_configured_as_subentry(
         CONF_MAC: "aabbccddeeff",
     }
     validate.assert_awaited_once_with("ZTBIN0100000022", "aabbccddeeff")
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], user_input={}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "child_added"
 
 
 async def test_zeroconf_ignores_unrelated_subentries(hass: HomeAssistant) -> None:
@@ -1137,11 +1178,24 @@ async def test_parent_selection_recovery(hass: HomeAssistant) -> None:
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"parent": parent.entry_id}
     )
+    # child_added completes setup outside the checker's *_successful convention.
+    # pylint: disable-next=home-assistant-tests-config-flow-error-recovery
     assert result["errors"] == {"base": "parent_unavailable"}
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"parent": other.entry_id}
     )
     assert result["step_id"] == "child"
+
+    other.runtime_data = SimpleNamespace(
+        api=SimpleNamespace(async_validate_child_device=AsyncMock())
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_DEVICE_ID: CHILD_DEVICE_ID, CONF_MAC: CHILD_MAC}
+    )
+    assert result["step_id"] == "child_details"
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "child_added"
 
 
 async def test_picker_child_validation_recovery(hass: HomeAssistant) -> None:
@@ -1164,6 +1218,8 @@ async def test_picker_child_validation_recovery(hass: HomeAssistant) -> None:
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {CONF_DEVICE_ID: CHILD_DEVICE_ID, CONF_MAC: CHILD_MAC}
     )
+    # child_added completes setup outside the checker's *_successful convention.
+    # pylint: disable-next=home-assistant-tests-config-flow-error-recovery
     assert result["errors"] == {"base": "cannot_connect"}
     assert not parent.subentries
     result = await hass.config_entries.flow.async_configure(
@@ -1171,6 +1227,10 @@ async def test_picker_child_validation_recovery(hass: HomeAssistant) -> None:
     )
     assert result["step_id"] == "child_details"
     assert len(parent.subentries) == 1
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "child_added"
 
 
 @pytest.mark.parametrize("model", ["ZTHZB", "ZTHG2", "ZTAAK"])
@@ -1454,6 +1514,8 @@ async def test_child_details_deleted_area(
     result = await manager.async_configure(
         flow_id, {CONF_NAME: "Thermostat", "area_id": "deleted-area"}
     )
+    # child_added completes setup outside the checker's *_successful convention.
+    # pylint: disable-next=home-assistant-tests-config-flow-error-recovery
     assert result["errors"] == {"area_id": "invalid_area"}
     assert len(entry.subentries) == 1
     device = device_registry.async_get_device_by_identifier(
@@ -1461,6 +1523,7 @@ async def test_child_details_deleted_area(
     )
     assert device.name_by_user is None
     result = await manager.async_configure(flow_id, {CONF_NAME: "Thermostat"})
+    assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "child_added"
     assert device_registry.async_get(device.id).name_by_user == "Thermostat"
 
@@ -1474,5 +1537,6 @@ async def test_child_details_removed_child(
     child = next(iter(entry.subentries.values()))
     hass.config_entries.async_remove_subentry(entry, child.subentry_id)
     result = await manager.async_configure(flow_id, {CONF_NAME: "Thermostat"})
+    assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "child_unavailable"
     assert not entry.subentries

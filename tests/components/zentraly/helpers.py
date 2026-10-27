@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 from zentraly import (
     BinarySensorCapability,
     NumberCapability,
@@ -42,8 +43,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.util import dt as dt_util
-
-from tests.common import MockConfigEntry, async_fire_time_changed
 
 type Action = Callable[[ZentralyDevice], Coroutine[Any, Any, bool]]
 
@@ -231,44 +230,34 @@ async def async_check_platform_refresh_lifecycle(
         refresh.assert_awaited_once_with()
         now = dt_util.utcnow()
         async_fire_time_changed(hass, now + timedelta(minutes=4))
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)
         assert refresh.await_count == 1
         async_fire_time_changed(hass, now + timedelta(minutes=5))
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)
         assert refresh.await_count == 2
 
         started = asyncio.Event()
         release = asyncio.Event()
-        scheduled = asyncio.Event()
 
         async def update() -> None:
             started.set()
             await release.wait()
-
-        original_schedule = entity.async_schedule_update_ha_state
-
-        def schedule(force_refresh: bool = False) -> None:
-            original_schedule(force_refresh)
-            scheduled.set()
 
         refresh.side_effect = update
         api._set_connected(False)
         api._set_connected(True)
         await started.wait()
         try:
-            with patch.object(
-                entity, "async_schedule_update_ha_state", side_effect=schedule
-            ):
-                async_fire_time_changed(hass, now + timedelta(minutes=10))
-                async with asyncio.timeout(1):
-                    await scheduled.wait()
-                assert refresh.await_count == 3
+            async_fire_time_changed(hass, now + timedelta(minutes=10))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert refresh.await_count == 3
         finally:
             release.set()
             await hass.async_block_till_done()
         assert await hass.config_entries.async_unload(entry.entry_id)
         async_fire_time_changed(hass, now + timedelta(minutes=15))
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)
         assert refresh.await_count == 3
         assert api._connection_state_listeners == set()
 
@@ -382,6 +371,14 @@ async def async_check_action_waits_for_read(
     assert state_case.service_data is not None
     setter = getattr(api, state_case.setter)
     setter.return_value = True
+
+    async def write(value: float | bool | SelectOperationMode) -> bool:
+        getter = getattr(api, state_case.getter)
+        getter.side_effect = None
+        getter.return_value = state_case.report
+        return True
+
+    setter.side_effect = write
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -427,7 +424,7 @@ async def async_check_periodic_read_policy(
     getter.assert_awaited_once()
     getter.reset_mock()
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=5))
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert getter.await_count == int(periodic_polling)
     api.add_state_listener.call_args.args[0]({state_case.capability: state_case.report})
     await hass.async_block_till_done()

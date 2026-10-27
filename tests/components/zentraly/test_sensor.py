@@ -7,6 +7,7 @@ from types import MappingProxyType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 from zentraly import (
     SensorCapability,
     ZentralyApi,
@@ -46,8 +47,6 @@ from .helpers import (
     async_check_platform_refresh_lifecycle,
     async_check_report_during_read,
 )
-
-from tests.common import MockConfigEntry, async_fire_time_changed
 
 
 @pytest.mark.parametrize("model", ["ZTBIN", "ZTTWZ"])
@@ -231,7 +230,7 @@ async def test_rssi_is_report_only(hass: HomeAssistant) -> None:
         api._set_connected(False)
         api._set_connected(True)
         async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=5))
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)
         refresh.assert_not_awaited()
         entity._handle_state_update({SensorCapability.RSSI: -65})
         assert entity.native_value == -65
@@ -336,7 +335,7 @@ async def test_wifi_reads_follow_topology(
     assert sensor_api.async_get_wifi_signal_power.await_count == wifi_reads
     sensor_api.async_get_power.assert_awaited_once()
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=5))
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert sensor_api.async_get_wifi_signal_power.await_count == wifi_reads * 2
     assert sensor_api.async_get_power.await_count == 2
     connection_state(True)
@@ -605,7 +604,7 @@ async def test_battery_sensor(
         assert state.attributes["unit_of_measurement"] == "%"
         api.async_get_battery_level.assert_awaited_once()
         async_fire_time_changed(hass, dt_util.utcnow() + timedelta(minutes=5))
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)
         api.async_get_battery_level.assert_awaited_once()
         api.add_state_listener.call_args.args[0]({SensorCapability.BATTERY_LEVEL: 0})
         assert hass.states.get(entity.entity_id).state == "0"

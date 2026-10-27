@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 from zentraly import (
     NumberCapability,
     SwitchCapability,
@@ -46,8 +47,6 @@ from .helpers import (
     async_check_platform_refresh_lifecycle,
     async_check_report_during_read,
 )
-
-from tests.common import MockConfigEntry, async_fire_time_changed
 
 
 @pytest.mark.parametrize(
@@ -288,12 +287,12 @@ async def test_periodic_refresh_preserves_pending_timer(
 ) -> None:
     """Do not replace a timer selection while its debounce is pending."""
     await timer.async_set_native_value(30)
-    await timer._async_periodic_refresh(dt_util.utcnow())
+    timer.async_schedule_update_ha_state(force_refresh=True)
     await hass.async_block_till_done()
     number_api.async_get_timer.assert_not_awaited()
     assert timer.native_value == 30
     await schedule.call_args.args[2](dt_util.utcnow())
-    await timer._async_periodic_refresh(dt_util.utcnow())
+    timer.async_schedule_update_ha_state(force_refresh=True)
     await hass.async_block_till_done()
     number_api.async_get_timer.assert_awaited_once_with()
     assert timer.native_value == 10
@@ -594,7 +593,7 @@ async def test_deferred_timer_serializes_actions(
     api.async_set_timer.side_effect = None
     api.async_set_timer.return_value = True
     async_fire_time_changed(hass, now + timedelta(seconds=8))
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert api.async_set_timer.await_count == 2
     api.async_set_timer.assert_awaited_with(40.0)
 
@@ -611,7 +610,7 @@ async def test_deferred_timer_failure_releases_semaphore(
         "number", "set_value", {ATTR_ENTITY_ID: entity_id, "value": 30}, blocking=True
     )
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=4))
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert hass.states.get(entity_id).state == "10.0"
     assert api.async_get_timer.await_count == 2
     await hass.services.async_call(
@@ -1002,7 +1001,12 @@ async def test_delay_number_service(
         api.supports.side_effect = {capability}.__contains__
         api.get_range.return_value = (0, 10, 1)
         getattr(api, setter.replace("set_", "get_")).return_value = 4.0
-        getattr(api, setter).return_value = True
+
+        async def write(value: float) -> bool:
+            getattr(api, setter.replace("set_", "get_")).return_value = value
+            return True
+
+        getattr(api, setter).side_effect = write
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
         await hass.async_block_till_done()
         entity_id = f"number.{device_id.lower()}_{capability.value}"

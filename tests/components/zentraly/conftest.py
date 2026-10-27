@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
+from pytest_homeassistant.common import MockConfigEntry
 from zentraly import (
     ClimateOperationMode,
     DeviceModel,
@@ -27,8 +28,6 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 
 from .helpers import periodic_polling, state_entity  # noqa: F401
-
-from tests.common import MockConfigEntry
 
 
 @pytest.fixture
@@ -147,6 +146,20 @@ def mock_climate_api() -> Generator[MagicMock]:
         api.async_get_heat_demand.return_value = False
         api.async_set_target_temperature.return_value = True
         api.async_set_operation_mode.return_value = True
+
+        async def set_temperature(value: float) -> bool:
+            if api.async_set_target_temperature.return_value is True:
+                api.async_get_target_temperature.return_value = value
+                api.async_get_operation_mode.return_value = ClimateOperationMode.MANUAL
+            return api.async_set_target_temperature.return_value
+
+        async def set_mode(value: ClimateOperationMode) -> bool:
+            if api.async_set_operation_mode.return_value is True:
+                api.async_get_operation_mode.return_value = value
+            return api.async_set_operation_mode.return_value
+
+        api.async_set_target_temperature.side_effect = set_temperature
+        api.async_set_operation_mode.side_effect = set_mode
         yield api
 
 

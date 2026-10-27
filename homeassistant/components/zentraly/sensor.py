@@ -1,6 +1,5 @@
 """Sensor platform for Zentraly."""
 
-from datetime import datetime
 from typing import Any, override
 
 from zentraly import SensorCapability, ZentralyOutputType, ZentralySensorApi
@@ -22,10 +21,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.event import async_track_time_interval
 
-from .const import DOMAIN, SCAN_INTERVAL
+from .const import DOMAIN, SCAN_INTERVAL as DEFAULT_SCAN_INTERVAL
 from .models import ZentralyConfigEntry, ZentralyDevice
+
+SCAN_INTERVAL = DEFAULT_SCAN_INTERVAL
 
 PARALLEL_UPDATES = 0
 
@@ -133,7 +133,6 @@ class ZentralySensor(SensorEntity):
     """Representation of a Zentraly sensor."""
 
     _attr_has_entity_name = True
-    _attr_should_poll = False
 
     def __init__(
         self,
@@ -226,24 +225,16 @@ class ZentralySensor(SensorEntity):
         )
 
         if self._capability not in _REPORT_ONLY_CAPABILITIES:
-            if self._device.supports_periodic_polling:
-                self.async_on_remove(
-                    async_track_time_interval(
-                        self.hass,
-                        self._async_periodic_refresh,
-                        SCAN_INTERVAL,
-                    )
-                )
-
             self.async_schedule_update_ha_state(force_refresh=True)
 
-    async def _async_periodic_refresh(
-        self,
-        now: datetime,
-    ) -> None:
-        """Refresh sensor state periodically as a synchronization fallback."""
-
-        self.async_schedule_update_ha_state(force_refresh=True)
+    @property
+    @override
+    def should_poll(self) -> bool:
+        """Use Home Assistant polling only when the device permits it."""
+        return (
+            self._device.supports_periodic_polling
+            and self._capability not in _REPORT_ONLY_CAPABILITIES
+        )
 
     @property
     @override

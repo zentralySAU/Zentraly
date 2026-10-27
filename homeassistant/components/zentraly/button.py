@@ -1,5 +1,6 @@
 """Button platform for Zentraly."""
 
+from collections.abc import Awaitable, Callable
 from typing import override
 
 from zentraly import ButtonCapability, ZentralyButtonApi
@@ -15,7 +16,7 @@ from .actions import translate_action_errors
 from .const import DOMAIN
 from .models import ZentralyConfigEntry, ZentralyDevice
 
-PARALLEL_UPDATES = 0
+PARALLEL_UPDATES = 1
 
 _OPENTHERM_CAPABILITIES = frozenset(
     {
@@ -33,12 +34,13 @@ _CONFIG_CAPABILITIES = frozenset(
 
 def _create_button_entities(
     device: ZentralyDevice,
-) -> list[ZentralyButton]:
+    refresh: Callable[[], Awaitable[None]],
+) -> list[ButtonEntity]:
     """Create button entities supported by a Zentraly device."""
 
     button_api = ZentralyButtonApi(device)
 
-    return [
+    entities: list[ButtonEntity] = [
         ZentralyButton(
             device=device,
             button_api=button_api,
@@ -47,6 +49,10 @@ def _create_button_entities(
         for capability in ButtonCapability
         if button_api.supports(capability)
     ]
+
+    if device.supports_device_info:
+        entities.append(ZentralyRefreshDeviceInfoButton(device, refresh))
+    return entities
 
 
 async def async_setup_entry(
@@ -58,6 +64,7 @@ async def async_setup_entry(
 
     parent_entities = _create_button_entities(
         entry.runtime_data.device,
+        entry.runtime_data.device_info_refresh[entry.runtime_data.device.device_id],
     )
 
     if parent_entities:
@@ -69,6 +76,7 @@ async def async_setup_entry(
     for subentry_id, child in entry.runtime_data.children.items():
         child_entities = _create_button_entities(
             child,
+            entry.runtime_data.device_info_refresh[child.device_id],
         )
 
         if not child_entities:
@@ -173,3 +181,45 @@ class ZentralyButton(ButtonEntity):
         """Return device information."""
 
         return self._device.device_info
+
+
+class ZentralyRefreshDeviceInfoButton(ButtonEntity):
+    """Read device versions on demand without periodic metadata polling."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "refresh_device_info"
+
+    def __init__(
+        self, device: ZentralyDevice, refresh: Callable[[], Awaitable[None]]
+    ) -> None:
+        """Initialize the diagnostic action for a parent or child."""
+        self._device = device
+        self._refresh = refresh
+        self._attr_unique_id = f"{device.device_id}_refresh_device_info"
+        self._attr_device_info = device.device_info
+
+    @property
+    @override
+    def available(self) -> bool:
+        """Require a connected device for the action."""
+        return super().available and self._device.available and self._device.connected
+
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Track device and connection availability."""
+        await super().async_added_to_hass()
+        self.async_on_remove(self._device.add_state_listener(self.async_write_ha_state))
+        self.async_on_remove(
+            self._device.add_connection_state_listener(self._handle_connection_state)
+        )
+
+    def _handle_connection_state(self, connected: bool) -> None:
+        """Publish connection availability."""
+        self.async_write_ha_state()
+
+    @override
+    @translate_action_errors
+    async def async_press(self) -> None:
+        """Refresh versions and report partial failures."""
+        await self._refresh()

@@ -22,7 +22,7 @@ def get_device_platforms(device_id: str) -> frozenset[Platform]:
     if model is DeviceModel.UNKNOWN:
         return frozenset()
     capabilities = get_device_commands(model).capabilities
-    return frozenset(
+    return frozenset({Platform.BUTTON}) | frozenset(
         platform
         for capability_type, platform in (
             (BinarySensorCapability, Platform.BINARY_SENSOR),
