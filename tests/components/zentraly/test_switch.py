@@ -453,3 +453,13 @@ async def test_disconnect_setting(
         api.async_set_disconnect_on_error.assert_awaited_once_with(True)
         api.async_set_power.assert_not_awaited()
         assert hass.states.get(entity_id).state == "on"
+
+
+@pytest.mark.parametrize(
+    "independent_platform", [(Platform.SWITCH, "comfort_mode")], indirect=True
+)
+async def test_platform_without_other_platforms(
+    hass: HomeAssistant, independent_platform: str
+) -> None:
+    """This platform obtains its own prerequisites without any other platform."""
+    assert hass.states.get(independent_platform).state == "on"

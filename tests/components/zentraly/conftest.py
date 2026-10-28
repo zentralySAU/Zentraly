@@ -2,7 +2,8 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Callable, Generator
-from unittest.mock import AsyncMock, MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import aiohttp
 import pytest
@@ -26,6 +27,7 @@ from homeassistant.const import (
     Platform,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from .helpers import periodic_polling, state_entity  # noqa: F401
 
@@ -200,3 +202,61 @@ async def setup_integration(
     ):
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
     await hass.async_block_till_done()
+
+
+@pytest.fixture
+async def independent_platform(
+    hass: HomeAssistant,
+    request: pytest.FixtureRequest,
+    mock_config_entry: MockConfigEntry,
+    mock_api: MagicMock,
+    mock_device_info: AsyncMock,
+    periodic_polling: bool,  # noqa: F811
+) -> AsyncIterator[str]:
+    """Load one real platform and library API, mocking only protocol transport."""
+    platform, capability = request.param
+    device_id = "ZTTWZ0100000001"
+    hass.config_entries.async_update_entry(
+        mock_config_entry,
+        data={**mock_config_entry.data, CONF_DEVICE_ID: device_id},
+        unique_id=device_id,
+    )
+    mock_api.device_id = device_id
+
+    async def execute(
+        builder: Callable[[int], dict[str, Any]],
+    ) -> tuple[int, dict[str, Any]]:
+        command = builder(1)
+        values = {100: 20, 101: 1, 102: 1, 1000: 1, 10001: 1, 18: 2100}
+        return 1, {
+            "cmd": command["cmd"],
+            "rid": 1,
+            "status": 200,
+            "attrs": [
+                {"id": attr["id"], "val": values.get(attr["id"], 1)}
+                for attr in command.get("attrs", [])
+            ],
+        }
+
+    mock_api.async_execute_command.side_effect = execute
+    with (
+        patch(
+            "homeassistant.components.zentraly.get_device_platforms",
+            return_value=frozenset({platform}),
+        ),
+        patch(
+            "homeassistant.components.zentraly.models.ZentralyDevice.supports_periodic_polling",
+            new_callable=PropertyMock,
+            return_value=periodic_polling,
+        ),
+    ):
+        assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+        assert {state.domain for state in hass.states.async_all()} == {platform}
+        entity_id = er.async_get(hass).async_get_entity_id(
+            platform,
+            DOMAIN,
+            device_id if platform is Platform.CLIMATE else f"{device_id}_{capability}",
+        )
+        assert entity_id is not None
+        yield entity_id

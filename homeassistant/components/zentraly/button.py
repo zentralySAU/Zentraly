@@ -13,8 +13,10 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .actions import translate_action_errors
-from .const import DOMAIN
+from .const import DOMAIN, SCAN_INTERVAL as DEFAULT_SCAN_INTERVAL
 from .models import ZentralyConfigEntry, ZentralyDevice
+
+SCAN_INTERVAL = DEFAULT_SCAN_INTERVAL
 
 PARALLEL_UPDATES = 1
 
@@ -93,7 +95,6 @@ class ZentralyButton(ButtonEntity):
     """Representation of a Zentraly button."""
 
     _attr_has_entity_name = True
-    _attr_should_poll = False
 
     def __init__(
         self,
@@ -126,12 +127,27 @@ class ZentralyButton(ButtonEntity):
             self._device.add_connection_state_listener(self._handle_connection_state)
         )
 
+    @property
+    @override
+    def should_poll(self) -> bool:
+        """Refresh action prerequisites without executing the action."""
+        return (
+            self._device.supports_periodic_polling
+            and self._capability in _OPENTHERM_CAPABILITIES
+        )
+
+    async def async_update(self) -> None:
+        """Keep prerequisites current even when no sensor platform is loaded."""
+        await self._device.async_refresh_dependencies(self._capability)
+
     def _handle_connection_state(
         self,
         connected: bool,
     ) -> None:
         """Handle Zentraly connection-state changes."""
 
+        if connected:
+            self.async_schedule_update_ha_state(force_refresh=True)
         self.async_write_ha_state()
 
     @property

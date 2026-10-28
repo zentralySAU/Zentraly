@@ -313,6 +313,10 @@ class ZentralyNumber(NumberEntity):
     async def async_update(self) -> None:
         """Update number state from the Zentraly device."""
 
+        await self._device.async_refresh_dependencies(
+            self._capability, endpoint=self._endpoint
+        )
+
         self._attr_available = self._device.connected
 
         if not self._device.connected:

@@ -608,3 +608,13 @@ async def test_battery_sensor(
         api.async_get_battery_level.assert_awaited_once()
         api.add_state_listener.call_args.args[0]({SensorCapability.BATTERY_LEVEL: 0})
         assert hass.states.get(entity.entity_id).state == "0"
+
+
+@pytest.mark.parametrize(
+    "independent_platform", [(Platform.SENSOR, "dhw_temperature")], indirect=True
+)
+async def test_platform_without_other_platforms(
+    hass: HomeAssistant, independent_platform: str
+) -> None:
+    """This platform obtains its own prerequisites without any other platform."""
+    assert hass.states.get(independent_platform).state == "1"

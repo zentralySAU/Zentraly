@@ -911,3 +911,13 @@ async def test_disabled_polling_keeps_reports_and_reconnect(
     connection_state(True)
     await hass.async_block_till_done()
     mock_climate_api.async_get_current_temperature.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "independent_platform", [(Platform.CLIMATE, "climate")], indirect=True
+)
+async def test_platform_without_other_platforms(
+    hass: HomeAssistant, independent_platform: str
+) -> None:
+    """This platform obtains its own prerequisites without any other platform."""
+    assert hass.states.get(independent_platform).state == "heat"

@@ -2,11 +2,13 @@
 
 import asyncio
 from collections.abc import Callable
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from freezegun.api import FrozenDateTimeFactory
 import pytest
-from pytest_homeassistant.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 from zentraly import (
     ButtonCapability,
     ZentralyApiError,
@@ -28,6 +30,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.entity import Entity
+from homeassistant.util import dt as dt_util
 
 from .conftest import DEVICE_ID
 from .helpers import (
@@ -335,3 +338,37 @@ async def setup_diagnostic_integration(
     ):
         assert await hass.config_entries.async_setup(mock_config_entry.entry_id)
     await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize(
+    "independent_platform", [(Platform.BUTTON, "reset_boiler")], indirect=True
+)
+async def test_platform_without_other_platforms(
+    hass: HomeAssistant, independent_platform: str
+) -> None:
+    """This platform obtains its own prerequisites without any other platform."""
+    assert hass.states.get(independent_platform).state == "unknown"
+
+
+@pytest.mark.parametrize("periodic_polling", [True, False])
+@pytest.mark.parametrize(
+    "independent_platform", [(Platform.BUTTON, "reset_boiler")], indirect=True
+)
+async def test_boiler_button_polls_only_prerequisites(
+    hass: HomeAssistant,
+    independent_platform: str,
+    mock_api: MagicMock,
+    periodic_polling: bool,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """An isolated button refreshes availability without sending an action."""
+    assert hass.states.get(independent_platform).state == "unknown"
+    mock_api.async_execute_command.reset_mock()
+    freezer.tick(timedelta(minutes=5))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert mock_api.async_execute_command.await_count == int(periodic_polling)
+    assert all(
+        call.args[0](1)["cmd"] == "readAttr"
+        for call in mock_api.async_execute_command.call_args_list
+    )

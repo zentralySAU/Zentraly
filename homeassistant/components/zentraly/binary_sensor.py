@@ -193,6 +193,8 @@ class ZentralyBinarySensor(BinarySensorEntity):
     async def async_update(self) -> None:
         """Update binary sensor state from the Zentraly device."""
 
+        await self._device.async_refresh_dependencies(self._capability)
+
         self._attr_available = self._device.connected
 
         if not self._device.connected:
