@@ -112,6 +112,7 @@ class ZentralySwitch(SwitchEntity):
         self._device = device
         self._switch_api = switch_api
         self._capability = capability
+        self._endpoint = channel if channel is not None else 1
         self._state_version = 0
 
         self._attr_unique_id = f"{device.device_id}_{capability.value}"
@@ -225,6 +226,10 @@ class ZentralySwitch(SwitchEntity):
 
     async def async_update(self) -> None:
         """Update switch state from the Zentraly device."""
+
+        await self._device.async_refresh_dependencies(
+            self._capability, endpoint=self._endpoint
+        )
 
         self._update_availability(self._device.connected)
 

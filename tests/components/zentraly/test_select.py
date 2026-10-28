@@ -412,3 +412,13 @@ async def test_display_setting_roundtrip(
         assert entity.current_option == entity.options[raw]
         await entity.async_remove()
     assert api._report_listeners == {}
+
+
+@pytest.mark.parametrize(
+    "independent_platform", [(Platform.SELECT, "display_mode")], indirect=True
+)
+async def test_platform_without_other_platforms(
+    hass: HomeAssistant, independent_platform: str
+) -> None:
+    """This platform obtains its own prerequisites without any other platform."""
+    assert hass.states.get(independent_platform).state == "temperature"

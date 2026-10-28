@@ -1031,3 +1031,13 @@ async def test_delay_number_service(
         getattr(api, setter).assert_awaited_once_with(0)
         api.async_set_timer.assert_not_awaited()
         assert hass.states.get(entity_id).state == "0.0"
+
+
+@pytest.mark.parametrize(
+    "independent_platform", [(Platform.NUMBER, "display_brightness")], indirect=True
+)
+async def test_platform_without_other_platforms(
+    hass: HomeAssistant, independent_platform: str
+) -> None:
+    """This platform obtains its own prerequisites without any other platform."""
+    assert hass.states.get(independent_platform).state == "20.0"

@@ -314,3 +314,15 @@ async def test_opentherm_report_updates_three_indicators(
         for entity in entities:
             await entity.async_remove()
     assert api._report_listeners == {}
+
+
+@pytest.mark.parametrize(
+    "independent_platform",
+    [(Platform.BINARY_SENSOR, "ot_heating_water_active")],
+    indirect=True,
+)
+async def test_platform_without_other_platforms(
+    hass: HomeAssistant, independent_platform: str
+) -> None:
+    """This platform obtains its own prerequisites without any other platform."""
+    assert hass.states.get(independent_platform).state == "on"
