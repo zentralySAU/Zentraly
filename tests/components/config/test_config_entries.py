@@ -1927,7 +1927,27 @@ async def test_subentry_flow_unauth(
     assert resp.status == HTTPStatus.UNAUTHORIZED
 
 
-async def test_two_step_subentry_flow(hass: HomeAssistant, client) -> None:
+@pytest.mark.parametrize(
+    ("setup_options", "extra_result"),
+    [
+        pytest.param({}, {}, id="default"),
+        pytest.param({"show_device_setup": False}, {}, id="disabled"),
+        pytest.param(
+            {"show_device_setup": True},
+            {
+                "show_device_setup": True,
+                "created_subentry": {"entry_id": ANY, "subentry_id": ANY},
+            },
+            id="enabled",
+        ),
+    ],
+)
+async def test_two_step_subentry_flow(
+    hass: HomeAssistant,
+    client: TestClient,
+    setup_options: dict[str, bool],
+    extra_result: dict[str, Any],
+) -> None:
     """Test we can finish a two step subentry flow."""
     mock_integration(
         hass, MockModule("test", async_setup_entry=AsyncMock(return_value=None))
@@ -1942,7 +1962,10 @@ async def test_two_step_subentry_flow(hass: HomeAssistant, client) -> None:
             async def async_step_finish(self, user_input=None):
                 if user_input:
                     return self.async_create_entry(
-                        title="Mock title", data=user_input, unique_id="test"
+                        title="Mock title",
+                        data=user_input,
+                        unique_id="test",
+                        **setup_options,
                     )
 
                 return self.async_show_form(
@@ -2001,6 +2024,7 @@ async def test_two_step_subentry_flow(hass: HomeAssistant, client) -> None:
             "handler": ["test1", "test"],
             "title": "Mock title",
             "type": "create_entry",
+            **extra_result,
             "unique_id": "test",
         }
 

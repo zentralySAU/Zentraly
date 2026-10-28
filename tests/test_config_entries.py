@@ -2438,8 +2438,26 @@ async def test_create_entry_options(
         assert entries[0].options == {"example": "option"}
 
 
+@pytest.mark.parametrize(
+    ("setup_options", "extra_result"),
+    [
+        pytest.param({}, {}, id="default"),
+        pytest.param({"show_device_setup": False}, {}, id="disabled"),
+        pytest.param(
+            {"show_device_setup": True},
+            {
+                "show_device_setup": True,
+                "created_subentry": {"entry_id": ANY, "subentry_id": ANY},
+            },
+            id="enabled",
+        ),
+    ],
+)
 async def test_on_create_entry_with_subentry_flow(
-    hass: HomeAssistant, manager: config_entries.ConfigEntries
+    hass: HomeAssistant,
+    manager: config_entries.ConfigEntries,
+    setup_options: dict[str, bool],
+    extra_result: dict[str, Any],
 ) -> None:
     """Test use async_on_create_entry with creating a subentry flow."""
 
@@ -2503,7 +2521,9 @@ async def test_on_create_entry_with_subentry_flow(
             """User flow."""
             if user_input is None:
                 return self.async_show_form(step_id="user")
-            return self.async_create_entry(title="subentry", data={"flow": "subentry"})
+            return self.async_create_entry(
+                title="subentry", data={"flow": "subentry"}, **setup_options
+            )
 
     with mock_config_flow("comp", TestFlow):
         assert await async_setup_component(hass, "comp", {})
@@ -2552,6 +2572,7 @@ async def test_on_create_entry_with_subentry_flow(
         assert result == {
             "context": {"source": "user"},
             "data": {"flow": "subentry"},
+            **extra_result,
             "description_placeholders": None,
             "description": None,
             "flow_id": ANY,

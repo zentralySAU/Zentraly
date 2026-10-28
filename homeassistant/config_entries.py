@@ -324,8 +324,18 @@ class ConfigFlowContext(FlowContext, total=False):
     unique_id: str | None
 
 
+class CreatedConfigSubentry(TypedDict):
+    """Identify a subentry created by a completed configuration flow."""
+
+    entry_id: str
+    subentry_id: str
+
+
 class ConfigFlowResult(FlowResult[ConfigFlowContext, str], total=False):
     """Typed result dict for config flow."""
+
+    created_subentry: CreatedConfigSubentry
+    show_device_setup: bool
 
     # Extra keys, only present if type is CREATE_ENTRY
     next_flow: tuple[FlowType, str]  # (flow type, flow id)
@@ -415,6 +425,8 @@ class SubentryFlowResult(FlowResult[SubentryFlowContext, tuple[str, str]], total
     """Typed result dict for subentry flow."""
 
     unique_id: str | None
+    created_subentry: CreatedConfigSubentry
+    show_device_setup: bool
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -3953,15 +3965,18 @@ class ConfigSubentryFlowManager(
         if unique_id is not None and not isinstance(unique_id, str):
             raise HomeAssistantError("unique_id must be a string")
 
-        self.hass.config_entries.async_add_subentry(
-            entry,
-            ConfigSubentry(
-                data=MappingProxyType(result["data"]),
-                subentry_type=subentry_type,
-                title=result["title"],
-                unique_id=unique_id,
-            ),
+        subentry = ConfigSubentry(
+            data=MappingProxyType(result["data"]),
+            subentry_type=subentry_type,
+            title=result["title"],
+            unique_id=unique_id,
         )
+        self.hass.config_entries.async_add_subentry(entry, subentry)
+        if result.get("show_device_setup") is True:
+            result["created_subentry"] = {
+                "entry_id": entry.entry_id,
+                "subentry_id": subentry.subentry_id,
+            }
 
         return result
 
@@ -3986,8 +4001,9 @@ class ConfigSubentryFlow(
         description: str | None = None,
         description_placeholders: Mapping[str, str] | None = None,
         unique_id: str | None = None,
+        show_device_setup: bool = False,
     ) -> SubentryFlowResult:
-        """Finish config flow and create a config entry."""
+        """Create a subentry, optionally offering native device personalization."""
         if self.source != SOURCE_USER:
             raise ValueError(f"Source is {self.source}, expected {SOURCE_USER}")
 
@@ -3999,6 +4015,8 @@ class ConfigSubentryFlow(
         )
 
         result["unique_id"] = unique_id
+        if show_device_setup:
+            result["show_device_setup"] = True
 
         return result
 
